@@ -20,10 +20,15 @@ class _SolariScreenState extends State<SolariScreen> {
   StreamSubscription<List<int>>? _notificationSubscription;
   BluetoothCharacteristic? _targetCharacteristic;
   final TextEditingController _messageController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   final List<String> _messages = [];
   bool _isConnected = false;
   bool _isSubscribed = false;
   int _currentMtu = 23; // Default BLE MTU
+
+  // Track last sent message to avoid showing it as received
+  List<int>? _lastSentData;
+  DateTime? _lastSentTime;
 
   // Target characteristic UUID
   static const String TARGET_CHARACTERISTIC_UUID =
@@ -63,6 +68,7 @@ class _SolariScreenState extends State<SolariScreen> {
     _mtuSubscription.cancel();
     _notificationSubscription?.cancel();
     _messageController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -114,6 +120,26 @@ class _SolariScreenState extends State<SolariScreen> {
           : (isSent ? "[SENT] " : "[RECEIVED] ");
       _messages.add("$prefix$message");
     });
+
+    // Auto-scroll to bottom after adding message
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  // Helper method to compare two lists
+  bool _listsEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   Future<void> _subscribeToNotifications() async {
@@ -126,13 +152,27 @@ class _SolariScreenState extends State<SolariScreen> {
       // Listen to notifications
       _notificationSubscription = _targetCharacteristic!.lastValueStream.listen(
         (value) {
-          String notification;
-          try {
-            notification = utf8.decode(value);
-          } catch (e) {
-            notification = value.toString();
+          // Check if this value matches what we just sent
+          bool isEcho = false;
+          if (_lastSentData != null && _lastSentTime != null) {
+            // Consider it an echo if it matches the last sent data
+            // and was received within 1 second of sending
+            if (_listsEqual(value, _lastSentData!) &&
+                DateTime.now().difference(_lastSentTime!).inMilliseconds <
+                    1000) {
+              isEcho = true;
+            }
           }
-          _addMessage("$notification (${value.length} bytes)");
+
+          if (!isEcho) {
+            String notification;
+            try {
+              notification = utf8.decode(value);
+            } catch (e) {
+              notification = value.toString();
+            }
+            _addMessage("$notification (${value.length} bytes)");
+          }
         },
       );
 
@@ -187,6 +227,10 @@ class _SolariScreenState extends State<SolariScreen> {
         return;
       }
 
+      // Track what we're about to send
+      _lastSentData = List.from(data);
+      _lastSentTime = DateTime.now();
+
       await _targetCharacteristic!.write(
         data,
         withoutResponse: _targetCharacteristic!.properties.writeWithoutResponse,
@@ -194,30 +238,11 @@ class _SolariScreenState extends State<SolariScreen> {
 
       _addMessage("$message (${data.length} bytes)", isSent: true);
       _messageController.clear();
-
-      // Auto-read response if possible
-      if (_targetCharacteristic!.properties.read) {
-        await _readResponse();
-      }
     } catch (e) {
       _addMessage("Send error: $e", isSystem: true);
-    }
-  }
-
-  Future<void> _readResponse() async {
-    if (_targetCharacteristic == null) return;
-
-    try {
-      List<int> value = await _targetCharacteristic!.read();
-      String response;
-      try {
-        response = utf8.decode(value);
-      } catch (e) {
-        response = value.toString();
-      }
-      _addMessage(response);
-    } catch (e) {
-      _addMessage("Read error: $e", isSystem: true);
+      // Clear tracking on error
+      _lastSentData = null;
+      _lastSentTime = null;
     }
   }
 
@@ -225,8 +250,9 @@ class _SolariScreenState extends State<SolariScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Solari Chat'),
+        title: Text('Solari Chat', style: TextStyle(fontSize: 16)),
         backgroundColor: _isConnected ? Colors.green[100] : Colors.red[100],
+        automaticallyImplyLeading: false, // Remove back button
       ),
       body: Column(
         children: [
@@ -235,13 +261,38 @@ class _SolariScreenState extends State<SolariScreen> {
             width: double.infinity,
             padding: EdgeInsets.all(8),
             color: Colors.grey[200],
-            child: Text(
-              'Device: ${widget.device.platformName} | '
-              'Status: ${_isConnected ? "Connected" : "Disconnected"} | '
-              'Characteristic: ${_targetCharacteristic != null ? "Found" : "Not Found"} | '
-              'MTU: $_currentMtu bytes | '
-              'Notifications: ${_isSubscribed ? "ON" : "OFF"}',
-              style: TextStyle(fontSize: 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Device: ${widget.device.platformName} | '
+                    'Status: ${_isConnected ? "Connected" : "Disconnected"} | '
+                    'Characteristic: ${_targetCharacteristic != null ? "Found" : "Not Found"} | '
+                    'MTU: $_currentMtu bytes | '
+                    'Notifications: ${_isSubscribed ? "ON" : "OFF"}',
+                    style: TextStyle(fontSize: 10),
+                  ),
+                ),
+                SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: (_targetCharacteristic != null && _isConnected)
+                      ? (_isSubscribed
+                            ? _unsubscribeFromNotifications
+                            : _subscribeToNotifications)
+                      : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _isSubscribed
+                        ? Colors.orange[200]
+                        : Colors.green[200],
+                    minimumSize: Size(60, 30),
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  ),
+                  child: Text(
+                    _isSubscribed ? 'Unsub' : 'Sub',
+                    style: TextStyle(fontSize: 10),
+                  ),
+                ),
+              ],
             ),
           ),
 
@@ -251,6 +302,7 @@ class _SolariScreenState extends State<SolariScreen> {
               margin: EdgeInsets.all(8),
               decoration: BoxDecoration(border: Border.all(color: Colors.grey)),
               child: ListView.builder(
+                controller: _scrollController,
                 itemCount: _messages.length,
                 itemBuilder: (context, index) {
                   String message = _messages[index];
@@ -271,7 +323,7 @@ class _SolariScreenState extends State<SolariScreen> {
                       color: backgroundColor,
                       borderRadius: BorderRadius.circular(4),
                     ),
-                    child: Text(message, style: TextStyle(fontSize: 12)),
+                    child: Text(message, style: TextStyle(fontSize: 10)),
                   );
                 },
               ),
@@ -289,8 +341,10 @@ class _SolariScreenState extends State<SolariScreen> {
                 Expanded(
                   child: TextField(
                     controller: _messageController,
+                    style: TextStyle(fontSize: 12),
                     decoration: InputDecoration(
                       hintText: 'Type message...',
+                      hintStyle: TextStyle(fontSize: 12),
                       border: OutlineInputBorder(),
                       contentPadding: EdgeInsets.symmetric(
                         horizontal: 12,
@@ -301,32 +355,12 @@ class _SolariScreenState extends State<SolariScreen> {
                   ),
                 ),
                 SizedBox(width: 8),
-                ElevatedButton(
+                ElevatedButton.icon(
                   onPressed: (_targetCharacteristic != null && _isConnected)
                       ? _sendMessage
                       : null,
-                  child: Text('Send'),
-                ),
-                SizedBox(width: 4),
-                ElevatedButton(
-                  onPressed: (_targetCharacteristic != null && _isConnected)
-                      ? _readResponse
-                      : null,
-                  child: Text('Read'),
-                ),
-                SizedBox(width: 4),
-                ElevatedButton(
-                  onPressed: (_targetCharacteristic != null && _isConnected)
-                      ? (_isSubscribed
-                            ? _unsubscribeFromNotifications
-                            : _subscribeToNotifications)
-                      : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _isSubscribed
-                        ? Colors.orange[200]
-                        : Colors.green[200],
-                  ),
-                  child: Text(_isSubscribed ? 'Unsub' : 'Sub'),
+                  icon: Icon(Icons.send, size: 16),
+                  label: Text('Send', style: TextStyle(fontSize: 12)),
                 ),
               ],
             ),
