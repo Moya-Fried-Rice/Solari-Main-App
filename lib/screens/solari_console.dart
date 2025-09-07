@@ -882,7 +882,7 @@ class _SolariScreenState extends State<SolariScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Solari Chat', style: TextStyle(fontSize: 14)),
+        title: const Text('Solari Console', style: TextStyle(fontSize: 14)),
         backgroundColor: _isConnected ? Colors.green[100] : Colors.red[100],
         automaticallyImplyLeading: false,
         actions: [

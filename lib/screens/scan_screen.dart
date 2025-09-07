@@ -8,7 +8,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 
 import '../utils/snackbar.dart';
 import '../utils/extra.dart';
-import 'solari_screen.dart';
+import 'solari_console.dart';
 
 class ScanScreen extends StatefulWidget {
   const ScanScreen({super.key});
