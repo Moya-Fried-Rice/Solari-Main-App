@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:location/location.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
 import '../utils/snackbar.dart';
 import '../utils/extra.dart';
@@ -76,9 +79,58 @@ class _ScanScreenState extends State<ScanScreen> {
   // Start scanning for Solari devices
   Future _startSolariDeviceScan() async {
     try {
-      // Reset device state when starting new scan
+      bool needsLocation = true;
+
+      // Check platform & version
+      if (Platform.isAndroid) {
+        final deviceInfo = DeviceInfoPlugin();
+        final androidInfo = await deviceInfo.androidInfo;
+        if (androidInfo.version.sdkInt >= 31) {
+          // Android 12+ (API 31): no location permission required for BLE scan
+          needsLocation = false;
+        }
+      } else if (Platform.isIOS) {
+        // iOS: still requires location permission for BLE scanning
+        needsLocation = true;
+      }
+
+      // If location requirement applies
+      if (needsLocation) {
+        Location location = Location();
+
+        // 1. Check if location service is enabled
+        bool serviceEnabled = await location.serviceEnabled();
+        if (!serviceEnabled) {
+          serviceEnabled = await location.requestService(); // Android shows system prompt
+          if (!serviceEnabled) {
+            Snackbar.show(
+              ABC.b,
+              "Location services are required for BLE scanning.",
+              success: false,
+            );
+            return;
+          }
+        }
+
+        // 2. Check and request location permission
+        PermissionStatus permissionGranted = await location.hasPermission();
+        if (permissionGranted == PermissionStatus.denied) {
+          permissionGranted = await location.requestPermission();
+          if (permissionGranted != PermissionStatus.granted) {
+            Snackbar.show(
+              ABC.b,
+              "Location permission is required for BLE scanning.",
+              success: false,
+            );
+            return;
+          }
+        }
+      }
+
+      // 3. Reset device state when starting new scan
       setState(() => _solariDevice = null);
 
+      // 4. Start BLE scan
       await FlutterBluePlus.startScan(
         timeout: const Duration(seconds: 15),
         withServices: [Guid(_solariServiceUUID)],
