@@ -967,8 +967,7 @@ class _SolariScreenState extends State<SolariScreen> {
                     Text(
                       'Status Information',
                       style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 9,
                         color: Colors.grey[600],
                       ),
                     ),
