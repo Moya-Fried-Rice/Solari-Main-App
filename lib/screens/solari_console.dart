@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'ai_assistant_screen.dart';
 
 /// Log entry types for categorizing messages
 enum LogType { system, sent, received, timing, error, image }
@@ -904,6 +905,14 @@ class _SolariScreenState extends State<SolariScreen> {
                     _subscribeToNotifications();
                   }
                   break;
+                case 'ai_assistant':
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) =>
+                          AIAssistantScreen(device: widget.device),
+                    ),
+                  );
+                  break;
                 case 'clear_image':
                   setState(() => _currentImage = null);
                   break;
@@ -913,6 +922,18 @@ class _SolariScreenState extends State<SolariScreen> {
               }
             },
             itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'ai_assistant',
+                enabled: _isConnected,
+                child: Row(
+                  children: [
+                    Icon(Icons.smart_toy, size: 16, color: Colors.purple),
+                    const SizedBox(width: 8),
+                    Text('AI Assistant', style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              ),
+              const PopupMenuDivider(),
               PopupMenuItem(
                 value: 'subscribe',
                 enabled: _targetCharacteristic != null && _isConnected,
@@ -966,10 +987,7 @@ class _SolariScreenState extends State<SolariScreen> {
                   children: [
                     Text(
                       'Status Information',
-                      style: TextStyle(
-                        fontSize: 9,
-                        color: Colors.grey[600],
-                      ),
+                      style: TextStyle(fontSize: 9, color: Colors.grey[600]),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -1200,6 +1218,21 @@ class _SolariScreenState extends State<SolariScreen> {
           ),
         ],
       ),
+      floatingActionButton: _isConnected
+          ? FloatingActionButton(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        AIAssistantScreen(device: widget.device),
+                  ),
+                );
+              },
+              backgroundColor: Colors.purple,
+              child: const Icon(Icons.smart_toy, color: Colors.white),
+              tooltip: 'AI Assistant',
+            )
+          : null,
     );
   }
 }
