@@ -4,10 +4,38 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'ai_assistant_screen.dart';
 
 /// Log entry types for categorizing messages
-enum LogType { system, sent, received, timing, error, image }
+enum LogType { system, sent, received, timing, error, image, audio }
+
+/// Audio properties class
+class AudioProperties {
+  final int sampleRate;
+  final int channels;
+  final int bitDepth;
+  final double duration;
+  final String format;
+  final double? compressionRatio;
+
+  AudioProperties({
+    required this.sampleRate,
+    required this.channels,
+    required this.bitDepth,
+    required this.duration,
+    required this.format,
+    this.compressionRatio,
+  });
+}
+
+/// Audio data wrapper class
+class AudioData {
+  final Uint8List data;
+  final AudioProperties properties;
+
+  AudioData({required this.data, required this.properties});
+}
 
 /// A structured log entry with metadata
 class LogEntry {
@@ -17,6 +45,7 @@ class LogEntry {
   final int? dataSize;
   final Duration? duration;
   final Uint8List? imageData; // Add image data to log entries
+  final AudioData? audioData; // Add audio data to log entries
 
   LogEntry({
     required this.message,
@@ -25,6 +54,7 @@ class LogEntry {
     this.dataSize,
     this.duration,
     this.imageData,
+    this.audioData,
   }) : timestamp = timestamp ?? DateTime.now();
 
   String get formattedMessage {
@@ -41,6 +71,7 @@ class LogEntry {
       LogType.timing => '[TIME]',
       LogType.error => '[ERR]',
       LogType.image => '[IMG]',
+      LogType.audio => '[AUD]',
     };
 
     String sizeInfo = dataSize != null ? ' (${dataSize}B)' : '';
@@ -59,6 +90,7 @@ class LogEntry {
       LogType.timing => Colors.purple[50]!,
       LogType.error => Colors.red[50]!,
       LogType.image => Colors.indigo[50]!,
+      LogType.audio => Colors.cyan[50]!,
     };
   }
 
@@ -70,6 +102,7 @@ class LogEntry {
       LogType.timing => Colors.purple[800]!,
       LogType.error => Colors.red[800]!,
       LogType.image => Colors.indigo[800]!,
+      LogType.audio => Colors.cyan[800]!,
     };
   }
 }
@@ -114,12 +147,23 @@ class _SolariScreenState extends State<SolariScreen> {
   Uint8List? _currentImage;
   DateTime? _imageStartTime;
 
+  // Audio reception state
+  bool _receivingAudio = false;
+  int _expectedAudioSize = 0;
+  final List<int> _audioBuffer = [];
+  DateTime? _audioStartTime;
+
   // Timing and performance metrics
   final Map<String, DateTime> _operationStartTimes = {};
   final Map<String, Duration> _operationDurations = {};
   int _messageCount = 0;
   int _totalBytesReceived = 0;
   int _totalBytesSent = 0;
+
+  // Audio player
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isAudioPlaying = false;
+  StreamSubscription<PlayerState>? _audioPlayerStateSubscription;
 
   // Configuration constants
   static const String kTargetCharacteristicUUID =
@@ -132,6 +176,13 @@ class _SolariScreenState extends State<SolariScreen> {
   void initState() {
     super.initState();
     _startOperation('initialization');
+
+    // Setup audio player state listener
+    _audioPlayerStateSubscription = _audioPlayer.onPlayerStateChanged.listen((state) {
+      setState(() {
+        _isAudioPlaying = state == PlayerState.playing;
+      });
+    });
 
     // Add scroll listener to detect manual scrolling
     _scrollController.addListener(() {
@@ -185,8 +236,10 @@ class _SolariScreenState extends State<SolariScreen> {
     _connectionStateSubscription.cancel();
     _mtuSubscription.cancel();
     _notificationSubscription?.cancel();
+    _audioPlayerStateSubscription?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -268,6 +321,7 @@ class _SolariScreenState extends State<SolariScreen> {
     int? dataSize,
     Duration? duration,
     Uint8List? imageData,
+    AudioData? audioData,
   }) {
     final entry = LogEntry(
       message: message,
@@ -275,6 +329,7 @@ class _SolariScreenState extends State<SolariScreen> {
       dataSize: dataSize,
       duration: duration,
       imageData: imageData,
+      audioData: audioData,
     );
 
     setState(() {
@@ -520,6 +575,205 @@ class _SolariScreenState extends State<SolariScreen> {
     return properties;
   }
 
+  /// Analyze audio properties from raw WAV bytes
+  Future<Map<String, dynamic>> _analyzeAudioProperties(
+    Uint8List audioData,
+  ) async {
+    final properties = <String, dynamic>{
+      'size_bytes': audioData.length,
+      'format': 'Unknown',
+      'sample_rate': null,
+      'channels': null,
+      'bit_depth': null,
+      'duration_seconds': null,
+      'data_rate': null,
+    };
+
+    try {
+      // Check for WAV file signature
+      if (audioData.length >= 44 &&
+          audioData[0] == 0x52 && // 'R'
+          audioData[1] == 0x49 && // 'I'
+          audioData[2] == 0x46 && // 'F'
+          audioData[3] == 0x46 && // 'F'
+          audioData[8] == 0x57 && // 'W'
+          audioData[9] == 0x41 && // 'A'
+          audioData[10] == 0x56 && // 'V'
+          audioData[11] == 0x45) {
+        // 'E'
+
+        properties['format'] = 'WAV';
+
+        // Find 'fmt ' chunk (usually starts at byte 12)
+        int fmtIndex = -1;
+        for (int i = 12; i < audioData.length - 4; i++) {
+          if (audioData[i] == 0x66 && // 'f'
+              audioData[i + 1] == 0x6D && // 'm'
+              audioData[i + 2] == 0x74 && // 't'
+              audioData[i + 3] == 0x20) {
+            // ' '
+            fmtIndex = i;
+            break;
+          }
+        }
+
+        if (fmtIndex >= 0 && fmtIndex + 24 < audioData.length) {
+          // Skip 'fmt ' and chunk size (8 bytes)
+          final headerStart = fmtIndex + 8;
+
+          // Audio format (2 bytes) - should be 1 for PCM
+          final audioFormat =
+              (audioData[headerStart + 1] << 8) | audioData[headerStart];
+
+          // Number of channels (2 bytes)
+          final numChannels =
+              (audioData[headerStart + 3] << 8) | audioData[headerStart + 2];
+          properties['channels'] = numChannels;
+
+          // Sample rate (4 bytes)
+          final sampleRate =
+              (audioData[headerStart + 7] << 24) |
+              (audioData[headerStart + 6] << 16) |
+              (audioData[headerStart + 5] << 8) |
+              audioData[headerStart + 4];
+          properties['sample_rate'] = sampleRate;
+
+          // Byte rate (4 bytes)
+          final byteRate =
+              (audioData[headerStart + 11] << 24) |
+              (audioData[headerStart + 10] << 16) |
+              (audioData[headerStart + 9] << 8) |
+              audioData[headerStart + 8];
+
+          // Bits per sample (2 bytes)
+          final bitsPerSample =
+              (audioData[headerStart + 15] << 8) | audioData[headerStart + 14];
+          properties['bit_depth'] = bitsPerSample;
+
+          // Calculate duration and data rate
+          if (sampleRate > 0 && numChannels > 0 && bitsPerSample > 0) {
+            // Find 'data' chunk to get actual audio data size
+            int dataIndex = -1;
+            int dataSize = 0;
+
+            for (int i = headerStart + 16; i < audioData.length - 8; i++) {
+              if (audioData[i] == 0x64 && // 'd'
+                  audioData[i + 1] == 0x61 && // 'a'
+                  audioData[i + 2] == 0x74 && // 't'
+                  audioData[i + 3] == 0x61) {
+                // 'a'
+                dataIndex = i;
+                // Data chunk size (4 bytes after 'data')
+                dataSize =
+                    (audioData[i + 7] << 24) |
+                    (audioData[i + 6] << 16) |
+                    (audioData[i + 5] << 8) |
+                    audioData[i + 4];
+                break;
+              }
+            }
+
+            if (dataIndex >= 0) {
+              final bytesPerSample = bitsPerSample ~/ 8;
+              final totalSamples = dataSize ~/ (numChannels * bytesPerSample);
+              final durationSeconds = totalSamples / sampleRate;
+
+              properties['duration_seconds'] = durationSeconds.toStringAsFixed(
+                2,
+              );
+              properties['data_rate'] =
+                  '${(byteRate / 1024).toStringAsFixed(1)} KB/s';
+
+              // Audio quality assessment
+              if (sampleRate >= 44100 && bitsPerSample >= 16) {
+                properties['quality'] = 'High';
+              } else if (sampleRate >= 22050 && bitsPerSample >= 8) {
+                properties['quality'] = 'Medium';
+              } else {
+                properties['quality'] = 'Low';
+              }
+            }
+          }
+
+          // Audio format description
+          if (audioFormat == 1) {
+            properties['encoding'] = 'PCM (Uncompressed)';
+          } else {
+            properties['encoding'] = 'Compressed (Format: $audioFormat)';
+          }
+        }
+      }
+      // Check for other audio formats
+      else if (audioData.length >= 4) {
+        // MP3 signature
+        if ((audioData[0] == 0xFF && (audioData[1] & 0xE0) == 0xE0) ||
+            (audioData[0] == 0x49 &&
+                audioData[1] == 0x44 &&
+                audioData[2] == 0x33)) {
+          properties['format'] = 'MP3';
+          properties['encoding'] = 'MPEG Audio Layer 3';
+        }
+        // OGG Vorbis signature
+        else if (audioData[0] == 0x4F &&
+            audioData[1] == 0x67 &&
+            audioData[2] == 0x67 &&
+            audioData[3] == 0x53) {
+          properties['format'] = 'OGG';
+          properties['encoding'] = 'Ogg Vorbis';
+        }
+        // FLAC signature
+        else if (audioData.length >= 4 &&
+            audioData[0] == 0x66 &&
+            audioData[1] == 0x4C &&
+            audioData[2] == 0x61 &&
+            audioData[3] == 0x43) {
+          properties['format'] = 'FLAC';
+          properties['encoding'] = 'Free Lossless Audio Codec';
+        }
+      }
+
+      // Calculate compression ratio if applicable
+      if (properties['sample_rate'] != null &&
+          properties['channels'] != null &&
+          properties['bit_depth'] != null &&
+          properties['duration_seconds'] != null) {
+        final sampleRate = properties['sample_rate'] as int;
+        final channels = properties['channels'] as int;
+        final bitDepth = properties['bit_depth'] as int;
+        final duration = double.parse(properties['duration_seconds'] as String);
+
+        final uncompressedSize =
+            (sampleRate * channels * bitDepth * duration / 8).round();
+        final compressionRatio = uncompressedSize / audioData.length;
+
+        if (compressionRatio > 1.1) {
+          properties['compression_ratio'] =
+              '${compressionRatio.toStringAsFixed(1)}:1';
+        } else {
+          properties['compression_ratio'] = 'Uncompressed';
+        }
+      }
+    } catch (e) {
+      properties['error'] = 'Failed to analyze: $e';
+    }
+
+    return properties;
+  }
+
+  /// Play audio data from AudioData object
+  Future<void> _playAudioData(AudioData audioData) async {
+    try {
+      _addLog('Playing audio...', LogType.audio);
+
+      // Use BytesSource to play audio from memory
+      await _audioPlayer.play(BytesSource(audioData.data));
+
+      _addLog('Audio playback started successfully', LogType.audio);
+    } catch (e) {
+      _addLog('Failed to play audio: $e', LogType.error);
+    }
+  }
+
   /// Check if two byte lists are equal (for echo detection)
   bool _areListsEqual(List<int> a, List<int> b) {
     if (a.length != b.length) return false;
@@ -604,6 +858,188 @@ class _SolariScreenState extends State<SolariScreen> {
     }
 
     // _endOperation('image_processing');
+  }
+
+  /// Process incoming audio data with enhanced logging
+  void _processAudioData(List<int> value) {
+    // Check if data could be a text command
+    bool isTextCommand = false;
+    String dataStr = '';
+
+    // Only decode as UTF-8 if it looks like text (all bytes < 128)
+    if (value.every((byte) => byte < 128)) {
+      try {
+        dataStr = utf8.decode(value);
+        isTextCommand = true;
+      } catch (e) {
+        isTextCommand = false;
+      }
+    }
+
+    // Handle text commands
+    if (isTextCommand) {
+      if (dataStr.startsWith('AUD_START:')) {
+        final sizeStr = dataStr.substring(10);
+        try {
+          _expectedAudioSize = int.parse(sizeStr);
+          _receivingAudio = true;
+          _audioBuffer.clear();
+          _audioStartTime = DateTime.now();
+
+          _addLog(
+            'Starting audio reception: $_expectedAudioSize bytes',
+            LogType.audio,
+          );
+        } catch (e) {
+          _addLog('Invalid audio size: $sizeStr', LogType.error);
+        }
+        return;
+      }
+
+      if (dataStr == 'AUD_END') {
+        if (_receivingAudio) {
+          _addLog('Received AUD_END signal', LogType.audio);
+          _finishAudioReception();
+        }
+        return;
+      }
+    }
+
+    // Add data to audio buffer if receiving
+    if (_receivingAudio) {
+      _audioBuffer.addAll(value);
+      // Progress will be shown in the progress bar widget, not in logs
+      setState(() {}); // Trigger UI update for progress bar
+      _autoScrollToBottom(); // Auto-scroll for progress updates
+    }
+  }
+
+  /// Finish audio reception with timing information
+  void _finishAudioReception() {
+    _startOperation('audio_finalization');
+
+    try {
+      final actualSize = _audioBuffer.length;
+      final transferDuration = _audioStartTime != null
+          ? DateTime.now().difference(_audioStartTime!)
+          : null;
+
+      final audioData = Uint8List.fromList(_audioBuffer);
+      setState(() {
+        _receivingAudio = false;
+      });
+
+      final sizeInfo = actualSize == _expectedAudioSize
+          ? 'Size: ${actualSize}B'
+          : 'Size: ${actualSize}B (expected: $_expectedAudioSize)';
+
+      final speedInfo = transferDuration != null && actualSize > 0
+          ? ' - Speed: ${(actualSize / transferDuration.inMilliseconds * 1000 / 1024).toStringAsFixed(2)} KB/s'
+          : '';
+
+      // Analyze audio properties
+      _analyzeAudioProperties(audioData)
+          .then((properties) {
+            String propertiesInfo = '';
+            AudioProperties audioProperties;
+
+            if (properties['format'] != 'Unknown') {
+              propertiesInfo = ' | Format: ${properties['format']}';
+
+              if (properties['sample_rate'] != null) {
+                propertiesInfo +=
+                    ' | Sample Rate: ${properties['sample_rate']} Hz';
+              }
+
+              if (properties['channels'] != null) {
+                propertiesInfo += ' | Channels: ${properties['channels']}';
+              }
+
+              if (properties['bit_depth'] != null) {
+                propertiesInfo += ' | Bit Depth: ${properties['bit_depth']}';
+              }
+
+              if (properties['duration_seconds'] != null) {
+                propertiesInfo +=
+                    ' | Duration: ${properties['duration_seconds']}s';
+              }
+
+              if (properties['encoding'] != null) {
+                propertiesInfo += ' | Encoding: ${properties['encoding']}';
+              }
+
+              if (properties['quality'] != null) {
+                propertiesInfo += ' | Quality: ${properties['quality']}';
+              }
+
+              if (properties['compression_ratio'] != null) {
+                propertiesInfo +=
+                    ' | Compression: ${properties['compression_ratio']}';
+              }
+
+              audioProperties = AudioProperties(
+                sampleRate: properties['sample_rate'] ?? 0,
+                channels: properties['channels'] ?? 1,
+                bitDepth: properties['bit_depth'] ?? 16,
+                duration: (properties['duration_seconds'] ?? 0.0).toDouble(),
+                format: properties['format'] ?? 'Unknown',
+                compressionRatio: properties['compression_ratio']?.toDouble(),
+              );
+            } else {
+              // Default properties if analysis failed
+              audioProperties = AudioProperties(
+                sampleRate: 44100,
+                channels: 1,
+                bitDepth: 16,
+                duration: 0.0,
+                format: 'Unknown',
+              );
+            }
+
+            final audioDataObj = AudioData(
+              data: audioData,
+              properties: audioProperties,
+            );
+
+            _addLog(
+              'Audio received! $sizeInfo$speedInfo$propertiesInfo',
+              LogType.audio,
+              dataSize: actualSize,
+              duration: transferDuration,
+              audioData: audioDataObj,
+            );
+          })
+          .catchError((error) {
+            // Fallback if audio analysis fails - create default AudioData
+            final defaultProperties = AudioProperties(
+              sampleRate: 44100,
+              channels: 1,
+              bitDepth: 16,
+              duration: 0.0,
+              format: 'Unknown',
+            );
+
+            final audioDataObj = AudioData(
+              data: audioData,
+              properties: defaultProperties,
+            );
+
+            _addLog(
+              'Audio received! $sizeInfo$speedInfo | Analysis failed: $error',
+              LogType.audio,
+              dataSize: actualSize,
+              duration: transferDuration,
+              audioData: audioDataObj,
+            );
+          });
+    } catch (e) {
+      _addLog('Failed to process audio: $e', LogType.error);
+      setState(() {
+        _receivingAudio = false;
+      });
+    }
+
+    _endOperation('audio_finalization');
   }
 
   /// Finish image reception with timing information
@@ -729,8 +1165,8 @@ class _SolariScreenState extends State<SolariScreen> {
           }
 
           if (!isEcho) {
-            // Skip logging individual chunks during image transfer
-            if (!_receivingImage) {
+            // Skip logging individual chunks during image or audio transfer
+            if (!_receivingImage && !_receivingAudio) {
               String notification;
               try {
                 notification = utf8.decode(value);
@@ -742,7 +1178,9 @@ class _SolariScreenState extends State<SolariScreen> {
               _addLog(notification, LogType.received, dataSize: value.length);
             }
 
+            // Process both image and audio data
             _processImageData(value);
+            _processAudioData(value);
           }
         },
       );
@@ -894,6 +1332,23 @@ class _SolariScreenState extends State<SolariScreen> {
             tooltip: 'Scroll to bottom',
             padding: const EdgeInsets.all(8),
           ),
+          // AI Assistant Button
+          IconButton(
+            onPressed: _isConnected
+                ? () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            AIAssistantScreen(device: widget.device),
+                      ),
+                    );
+                  }
+                : null,
+            icon: const Icon(Icons.smart_toy, size: 20),
+            tooltip: 'AI Assistant',
+            padding: const EdgeInsets.all(8),
+            color: _isConnected ? Colors.black : Colors.grey,
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, size: 20),
             onSelected: (value) {
@@ -905,14 +1360,6 @@ class _SolariScreenState extends State<SolariScreen> {
                     _subscribeToNotifications();
                   }
                   break;
-                case 'ai_assistant':
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          AIAssistantScreen(device: widget.device),
-                    ),
-                  );
-                  break;
                 case 'clear_image':
                   setState(() => _currentImage = null);
                   break;
@@ -922,18 +1369,6 @@ class _SolariScreenState extends State<SolariScreen> {
               }
             },
             itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'ai_assistant',
-                enabled: _isConnected,
-                child: Row(
-                  children: [
-                    Icon(Icons.smart_toy, size: 16, color: Colors.purple),
-                    const SizedBox(width: 8),
-                    Text('AI Assistant', style: const TextStyle(fontSize: 12)),
-                  ],
-                ),
-              ),
-              const PopupMenuDivider(),
               PopupMenuItem(
                 value: 'subscribe',
                 enabled: _targetCharacteristic != null && _isConnected,
@@ -1165,6 +1600,89 @@ class _SolariScreenState extends State<SolariScreen> {
                               ),
                             ),
                           ),
+                        // Show audio controls inline if this log entry contains audio data
+                        if (entry.audioData != null)
+                          Container(
+                            margin: const EdgeInsets.only(top: 4),
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.cyan.withOpacity(0.1),
+                              border: Border.all(
+                                color: Colors.cyan.withOpacity(0.3),
+                              ),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Row(
+                              children: [
+                                IconButton(
+                                  icon: Icon(
+                                    _isAudioPlaying
+                                        ? Icons.pause
+                                        : Icons.play_arrow,
+                                    color: Colors.cyan,
+                                    size: 16,
+                                  ),
+                                  onPressed: () async {
+                                    if (_isAudioPlaying) {
+                                      await _audioPlayer.pause();
+                                    } else {
+                                      await _playAudioData(entry.audioData!);
+                                    }
+                                  },
+                                  constraints: BoxConstraints(
+                                    minWidth: 24,
+                                    minHeight: 24,
+                                  ),
+                                  padding: EdgeInsets.all(2),
+                                ),
+                                IconButton(
+                                  icon: Icon(
+                                    Icons.stop,
+                                    color: Colors.cyan,
+                                    size: 16,
+                                  ),
+                                  onPressed: () async {
+                                    await _audioPlayer.stop();
+                                    setState(() {
+                                      _isAudioPlaying = false;
+                                    });
+                                  },
+                                  constraints: BoxConstraints(
+                                    minWidth: 24,
+                                    minHeight: 24,
+                                  ),
+                                  padding: EdgeInsets.all(2),
+                                ),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '🎵 Audio: ${entry.audioData!.properties.duration.toStringAsFixed(1)}s',
+                                        style: TextStyle(
+                                          color: Colors.cyan,
+                                          fontSize: 7,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      Text(
+                                        '${entry.audioData!.properties.sampleRate}Hz, '
+                                        '${entry.audioData!.properties.channels} ch, '
+                                        '${entry.audioData!.properties.bitDepth}-bit',
+                                        style: TextStyle(
+                                          color: Colors.cyan.withOpacity(0.8),
+                                          fontSize: 6,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
                   );
@@ -1218,21 +1736,6 @@ class _SolariScreenState extends State<SolariScreen> {
           ),
         ],
       ),
-      floatingActionButton: _isConnected
-          ? FloatingActionButton(
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) =>
-                        AIAssistantScreen(device: widget.device),
-                  ),
-                );
-              },
-              backgroundColor: Colors.purple,
-              child: const Icon(Icons.smart_toy, color: Colors.white),
-              tooltip: 'AI Assistant',
-            )
-          : null,
     );
   }
 }

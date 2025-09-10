@@ -30,8 +30,7 @@ class AIAssistantScreen extends StatefulWidget {
   State<AIAssistantScreen> createState() => _AIAssistantScreenState();
 }
 
-class _AIAssistantScreenState extends State<AIAssistantScreen>
-    with TickerProviderStateMixin {
+class _AIAssistantScreenState extends State<AIAssistantScreen> {
   // Connection management
   late StreamSubscription<BluetoothConnectionState>
   _connectionStateSubscription;
@@ -48,29 +47,12 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
   Uint8List? _capturedImage;
   String? _imageCaption;
   String? _errorMessage;
-  final TextEditingController _commandController = TextEditingController();
 
   // Text-to-Speech controller
   FlutterTts flutterTts = FlutterTts();
 
-  // Animation controllers
-  late AnimationController _pulseController;
-  late AnimationController _rotationController;
-  late Animation<double> _pulseAnimation;
-  late Animation<double> _rotationAnimation;
-
   // Available capture commands to try
-  final List<String> _captureCommands = [
-    'CAPTURE',
-    'capture',
-    'IMG_CAPTURE',
-    'PHOTO',
-    'photo',
-    'TAKE_PHOTO',
-    'snap',
-    'camera',
-    'pic',
-  ];
+  final List<String> _captureCommands = ['IMAGE'];
   int _currentCommandIndex = 0;
 
   // Gemini API configuration
@@ -81,28 +63,8 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
   @override
   void initState() {
     super.initState();
-    _initializeAnimations();
     _setupConnection();
     _initializeTts();
-  }
-
-  void _initializeAnimations() {
-    _pulseController = AnimationController(
-      duration: const Duration(seconds: 2),
-      vsync: this,
-    );
-    _rotationController = AnimationController(
-      duration: const Duration(seconds: 3),
-      vsync: this,
-    );
-
-    _pulseAnimation = Tween<double>(begin: 0.8, end: 1.2).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
-
-    _rotationAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _rotationController, curve: Curves.linear),
-    );
   }
 
   void _initializeTts() {
@@ -261,9 +223,6 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
       _errorMessage = null;
     });
 
-    _pulseController.repeat(reverse: true);
-    _rotationController.repeat();
-
     try {
       final base64Image = base64Encode(_capturedImage!);
 
@@ -336,8 +295,6 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
       setState(() {
         _processingImage = false;
       });
-      _pulseController.stop();
-      _rotationController.stop();
     }
   }
 
@@ -389,32 +346,6 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
     }
   }
 
-  Future<void> _sendCustomCommand() async {
-    if (_targetCharacteristic == null || !_isConnected) {
-      setState(() {
-        _errorMessage = 'Device not connected or characteristic not found';
-      });
-      return;
-    }
-
-    final commandText = _commandController.text.trim();
-    if (commandText.isEmpty) return;
-
-    try {
-      final command = utf8.encode(commandText);
-      await _targetCharacteristic!.write(command);
-      _commandController.clear();
-
-      setState(() {
-        _errorMessage = 'Sent: $commandText';
-      });
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Failed to send command: $e';
-      });
-    }
-  }
-
   double get _imageProgress {
     if (_expectedImageSize == 0) return 0.0;
     return _imageBuffer.length / _expectedImageSize;
@@ -422,11 +353,8 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
 
   @override
   void dispose() {
-    _pulseController.dispose();
-    _rotationController.dispose();
     _connectionStateSubscription.cancel();
     _notificationSubscription?.cancel();
-    _commandController.dispose();
     flutterTts.stop();
     super.dispose();
   }
@@ -435,71 +363,56 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('AI Assistant'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-          IconButton(
-            icon: Icon(
-              _isConnected
-                  ? Icons.bluetooth_connected
-                  : Icons.bluetooth_disabled,
-              color: _isConnected ? Colors.green : Colors.red,
-            ),
-            onPressed: null,
-          ),
-        ],
+        title: const Text('AI Assistant - DEV', style: TextStyle(fontSize: 14)),
+        backgroundColor: _isConnected ? Colors.green[100] : Colors.red[100],
+        foregroundColor: Colors.black,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
+      body: Container(
+        color: Colors.grey[50],
         child: Column(
           children: [
-            // Status Card
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Row(
-                  children: [
-                    Icon(
-                      _isConnected ? Icons.check_circle : Icons.error,
-                      color: _isConnected ? Colors.green : Colors.red,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _isConnected
-                          ? 'Connected to ${widget.device.platformName}'
-                          : 'Disconnected',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                  ],
-                ),
+            // Simple Status Bar
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.all(6),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey),
+                color: Colors.white,
+              ),
+              child: Text(
+                'Status: ${_isConnected ? 'Connected' : 'Disconnected'} | Device: ${widget.device.platformName}',
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 10),
               ),
             ),
 
-            const SizedBox(height: 20),
+            // Main Content Area (Scrollable)
+            Expanded(child: _buildSimpleContent()),
 
-            // Main Content Area
-            Expanded(child: _buildMainContent()),
-
-            // Capture Button
-            const SizedBox(height: 20),
-            SizedBox(
+            // Simple Button
+            Container(
               width: double.infinity,
-              height: 60,
-              child: ElevatedButton.icon(
-                onPressed:
-                    (_isConnected && !_receivingImage && !_processingImage)
+              margin: const EdgeInsets.all(6),
+              height: 40,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey),
+                color: _isConnected && !_receivingImage && !_processingImage
+                    ? Colors.white
+                    : Colors.grey[300],
+              ),
+              child: InkWell(
+                onTap: (_isConnected && !_receivingImage && !_processingImage)
                     ? _captureImage
                     : null,
-                icon: const Icon(Icons.camera_alt, size: 24),
-                label: const Text(
-                  'Capture & Analyze Image',
-                  style: TextStyle(fontSize: 18),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+                child: const Center(
+                  child: Text(
+                    '[CAPTURE IMAGE]',
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: Colors.black,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
               ),
@@ -510,321 +423,293 @@ class _AIAssistantScreenState extends State<AIAssistantScreen>
     );
   }
 
-  Widget _buildMainContent() {
+  Widget _buildSimpleContent() {
     if (_errorMessage != null) {
-      return _buildErrorCard();
+      return SingleChildScrollView(
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.all(6),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.red),
+            color: Colors.red[50],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '[ERROR]',
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _errorMessage ?? '',
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 10),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  color: Colors.white,
+                ),
+                child: InkWell(
+                  onTap: () {
+                    setState(() {
+                      _errorMessage = null;
+                    });
+                  },
+                  child: const Text(
+                    '[DISMISS]',
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 10,
+                      color: Colors.black,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
     if (_receivingImage) {
-      return _buildReceivingImageCard();
-    }
-
-    if (_processingImage) {
-      return _buildProcessingCard();
-    }
-
-    if (_capturedImage != null && _imageCaption != null) {
-      return _buildResultCard();
-    }
-
-    return _buildWelcomeCard();
-  }
-
-  Widget _buildWelcomeCard() {
-    return Card(
-      elevation: 4,
-      child: Container(
+      final percentage = (_imageProgress * 100).toStringAsFixed(1);
+      return Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(24.0),
+        margin: const EdgeInsets.all(6),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.blue),
+          color: Colors.blue[50],
+        ),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.smart_toy, size: 80, color: Colors.blue[300]),
-            const SizedBox(height: 16),
-            Text(
-              'AI Assistant',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Capture an image and let AI describe what it sees',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyLarge?.copyWith(color: Colors.grey[600]),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            const Icon(Icons.arrow_downward, size: 32, color: Colors.grey),
-            const SizedBox(height: 8),
-            Text(
-              'Tap the button below to start',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Next command to try: ${_captureCommands[_currentCommandIndex]}',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Colors.grey[500],
+            const Text(
+              '[RECEIVING IMAGE]',
+              style: TextStyle(
                 fontFamily: 'monospace',
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
               ),
             ),
-            const SizedBox(height: 24),
-            const Divider(),
-            const SizedBox(height: 16),
-            Text(
-              'Or send a custom command:',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _commandController,
-                    decoration: const InputDecoration(
-                      hintText: 'Enter command...',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    onSubmitted: (_) => _sendCustomCommand(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: _isConnected ? _sendCustomCommand : null,
-                  child: const Text('Send'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildReceivingImageCard() {
-    final percentage = (_imageProgress * 100).toStringAsFixed(1);
-
-    return Card(
-      elevation: 4,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const CircularProgressIndicator(strokeWidth: 6),
-            const SizedBox(height: 24),
-            Text(
-              'Receiving Image...',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 16),
-            LinearProgressIndicator(
-              value: _imageProgress,
-              backgroundColor: Colors.grey[300],
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '$percentage% (${_imageBuffer.length}/$_expectedImageSize bytes)',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildProcessingCard() {
-    return Card(
-      elevation: 4,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            AnimatedBuilder(
-              animation: _pulseAnimation,
-              builder: (context, child) {
-                return Transform.scale(
-                  scale: _pulseAnimation.value,
-                  child: AnimatedBuilder(
-                    animation: _rotationAnimation,
-                    builder: (context, child) {
-                      return Transform.rotate(
-                        angle: _rotationAnimation.value * 2 * 3.14159,
-                        child: const Icon(
-                          Icons.psychology,
-                          size: 80,
-                          color: Colors.purple,
-                        ),
-                      );
-                    },
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'AI is analyzing...',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 16),
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            Text(
-              'Processing image with Gemini AI',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildResultCard() {
-    return Card(
-      elevation: 4,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.image, color: Colors.green),
-                const SizedBox(width: 8),
-                Text(
-                  'Image Analysis Complete',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleLarge?.copyWith(color: Colors.green),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // Image Preview
-            if (_capturedImage != null)
-              Container(
-                width: double.infinity,
-                height: 200,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.memory(
-                    _capturedImage!,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) {
-                      return Container(
-                        color: Colors.grey[200],
-                        child: const Center(
-                          child: Text('Image preview not available'),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-
-            const SizedBox(height: 16),
-
-            // AI Caption
+            const SizedBox(height: 12),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(16),
+              height: 6,
               decoration: BoxDecoration(
-                color: Colors.blue[50],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.blue[200]!),
+                border: Border.all(color: Colors.grey),
+                color: Colors.blue[100],
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Stack(
                 children: [
-                  Row(
-                    children: [
-                      Icon(Icons.smart_toy, color: Colors.blue[700]),
-                      const SizedBox(width: 8),
-                      Text(
-                        'AI Description:',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(
-                              color: Colors.blue[700],
-                              fontWeight: FontWeight.bold,
-                            ),
-                      ),
-                      const Spacer(),
-                      // TTS Controls
-                      IconButton(
-                        onPressed: _isSpeaking
-                            ? _stopSpeaking
-                            : () => _speakText(_imageCaption ?? ''),
-                        icon: Icon(
-                          _isSpeaking ? Icons.stop : Icons.volume_up,
-                          color: Colors.blue[700],
-                        ),
-                        tooltip: _isSpeaking ? 'Stop speaking' : 'Read aloud',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _imageCaption ?? '',
-                    style: Theme.of(context).textTheme.bodyMedium,
+                  Container(
+                    width:
+                        (MediaQuery.of(context).size.width - 64) *
+                        _imageProgress,
+                    color: Colors.blue[600],
                   ),
                 ],
               ),
             ),
+            const SizedBox(height: 6),
+            Text(
+              '$percentage% (${_imageBuffer.length}/${_expectedImageSize} bytes)',
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 10),
+            ),
           ],
         ),
-      ),
-    );
-  }
+      );
+    }
 
-  Widget _buildErrorCard() {
-    return Card(
-      elevation: 4,
-      color: Colors.red[50],
+    if (_processingImage) {
+      return Container(
+        width: double.infinity,
+        margin: const EdgeInsets.all(6),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.purple),
+          color: Colors.purple[50],
+        ),
+        child: const Column(
+          children: [
+            Text(
+              '[PROCESSING...]',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'AI analyzing image...',
+              style: TextStyle(fontFamily: 'monospace', fontSize: 10),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_capturedImage != null && _imageCaption != null) {
+      return SingleChildScrollView(
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.all(6),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.green),
+            color: Colors.green[50],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '[RESULT]',
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Display actual image
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 200),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  color: Colors.white,
+                ),
+                child: _capturedImage != null
+                    ? Image.memory(
+                        _capturedImage!,
+                        fit: BoxFit.fitHeight,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            height: 100,
+                            color: Colors.grey[200],
+                            child: const Center(
+                              child: Text(
+                                '[IMAGE ERROR]',
+                                style: TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      )
+                    : Container(
+                        height: 100,
+                        color: Colors.grey[100],
+                        child: const Center(
+                          child: Text(
+                            '[NO IMAGE]',
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 10,
+                            ),
+                          ),
+                        ),
+                      ),
+              ),
+
+              const SizedBox(height: 12),
+
+              // AI caption
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  color: Colors.white,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '[AI DESCRIPTION]',
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      _imageCaption ?? '',
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
+              // TTS button
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  color: Colors.white,
+                ),
+                child: InkWell(
+                  onTap: _isSpeaking
+                      ? _stopSpeaking
+                      : () => _speakText(_imageCaption ?? ''),
+                  child: Text(
+                    _isSpeaking ? '[STOP AUDIO]' : '[PLAY AUDIO]',
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 10,
+                      color: Colors.black,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Default welcome state
+    return SizedBox(
+      height: MediaQuery.of(context).size.height,
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(24.0),
+        margin: const EdgeInsets.all(6),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.grey),
+          color: Colors.grey[50],
+        ),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.error, size: 80, color: Colors.red),
-            const SizedBox(height: 16),
-            Text(
-              'Error',
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(color: Colors.red),
+            const Text(
+              '[AI ASSISTANT - DEV MODE]',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
             ),
-            const SizedBox(height: 16),
-            Text(
-              _errorMessage ?? '',
-              style: Theme.of(context).textTheme.bodyMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _errorMessage = null;
-                });
-              },
-              child: const Text('Dismiss'),
+            const SizedBox(height: 12),
+            const Text(
+              'Ready to capture and analyze images',
+              style: TextStyle(fontFamily: 'monospace', fontSize: 10),
             ),
           ],
         ),
