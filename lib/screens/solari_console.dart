@@ -8,7 +8,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'ai_assistant_screen.dart';
 
 /// Log entry types for categorizing messages
-enum LogType { system, sent, received, timing, error, image, audio }
+enum LogType { system, sent, received, timing, error, image, audio, vqa }
 
 /// Audio properties class
 class AudioProperties {
@@ -37,6 +37,27 @@ class AudioData {
   AudioData({required this.data, required this.properties});
 }
 
+/// VQA data wrapper class that contains both image and audio
+class VQAData {
+  final Uint8List? imageData;
+  final AudioData? audioData;
+  final DateTime timestamp;
+  final Map<String, dynamic>? imageProperties;
+  final Map<String, dynamic>? audioProperties;
+
+  VQAData({
+    this.imageData,
+    this.audioData,
+    required this.timestamp,
+    this.imageProperties,
+    this.audioProperties,
+  });
+
+  bool get isComplete => imageData != null && audioData != null;
+  bool get hasImage => imageData != null;
+  bool get hasAudio => audioData != null;
+}
+
 /// A structured log entry with metadata
 class LogEntry {
   final String message;
@@ -46,6 +67,7 @@ class LogEntry {
   final Duration? duration;
   final Uint8List? imageData; // Add image data to log entries
   final AudioData? audioData; // Add audio data to log entries
+  final VQAData? vqaData; // Add VQA data to log entries
 
   LogEntry({
     required this.message,
@@ -55,6 +77,7 @@ class LogEntry {
     this.duration,
     this.imageData,
     this.audioData,
+    this.vqaData,
   }) : timestamp = timestamp ?? DateTime.now();
 
   String get formattedMessage {
@@ -72,6 +95,7 @@ class LogEntry {
       LogType.error => '[ERR]',
       LogType.image => '[IMG]',
       LogType.audio => '[AUD]',
+      LogType.vqa => '[VQA]',
     };
 
     String sizeInfo = dataSize != null ? ' (${dataSize}B)' : '';
@@ -91,6 +115,7 @@ class LogEntry {
       LogType.error => Colors.red[50]!,
       LogType.image => Colors.indigo[50]!,
       LogType.audio => Colors.cyan[50]!,
+      LogType.vqa => Colors.deepPurple[50]!,
     };
   }
 
@@ -103,6 +128,7 @@ class LogEntry {
       LogType.error => Colors.red[800]!,
       LogType.image => Colors.indigo[800]!,
       LogType.audio => Colors.cyan[800]!,
+      LogType.vqa => Colors.deepPurple[800]!,
     };
   }
 }
@@ -153,6 +179,22 @@ class _SolariScreenState extends State<SolariScreen> {
   final List<int> _audioBuffer = [];
   DateTime? _audioStartTime;
 
+  // VQA reception state
+  bool _receivingVQA = false;
+  bool _vqaImageReceived = false;
+  bool _vqaAudioReceived = false;
+  Uint8List? _vqaImageData;
+  AudioData? _vqaAudioData;
+  Map<String, dynamic>? _vqaImageProperties;
+  Map<String, dynamic>? _vqaAudioProperties;
+  DateTime? _vqaStartTime;
+  int _vqaExpectedImageSize = 0;
+  int _vqaExpectedAudioSize = 0;
+  final List<int> _vqaImageBuffer = [];
+  final List<int> _vqaAudioBuffer = [];
+  DateTime? _vqaImageStartTime;
+  DateTime? _vqaAudioStartTime;
+
   // Timing and performance metrics
   final Map<String, DateTime> _operationStartTimes = {};
   final Map<String, Duration> _operationDurations = {};
@@ -178,7 +220,9 @@ class _SolariScreenState extends State<SolariScreen> {
     _startOperation('initialization');
 
     // Setup audio player state listener
-    _audioPlayerStateSubscription = _audioPlayer.onPlayerStateChanged.listen((state) {
+    _audioPlayerStateSubscription = _audioPlayer.onPlayerStateChanged.listen((
+      state,
+    ) {
       setState(() {
         _isAudioPlaying = state == PlayerState.playing;
       });
@@ -322,6 +366,7 @@ class _SolariScreenState extends State<SolariScreen> {
     Duration? duration,
     Uint8List? imageData,
     AudioData? audioData,
+    VQAData? vqaData,
   }) {
     final entry = LogEntry(
       message: message,
@@ -330,6 +375,7 @@ class _SolariScreenState extends State<SolariScreen> {
       duration: duration,
       imageData: imageData,
       audioData: audioData,
+      vqaData: vqaData,
     );
 
     setState(() {
@@ -590,6 +636,13 @@ class _SolariScreenState extends State<SolariScreen> {
     };
 
     try {
+      // Debug: Log first few bytes
+      if (audioData.length >= 12) {
+        print(
+          'DEBUG: Audio header bytes: ${audioData.take(12).map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}',
+        );
+      }
+
       // Check for WAV file signature
       if (audioData.length >= 44 &&
           audioData[0] == 0x52 && // 'R'
@@ -602,6 +655,7 @@ class _SolariScreenState extends State<SolariScreen> {
           audioData[11] == 0x45) {
         // 'E'
 
+        print('DEBUG: Valid WAV signature found');
         properties['format'] = 'WAV';
 
         // Find 'fmt ' chunk (usually starts at byte 12)
@@ -613,6 +667,7 @@ class _SolariScreenState extends State<SolariScreen> {
               audioData[i + 3] == 0x20) {
             // ' '
             fmtIndex = i;
+            print('DEBUG: Found fmt chunk at index $i');
             break;
           }
         }
@@ -620,15 +675,18 @@ class _SolariScreenState extends State<SolariScreen> {
         if (fmtIndex >= 0 && fmtIndex + 24 < audioData.length) {
           // Skip 'fmt ' and chunk size (8 bytes)
           final headerStart = fmtIndex + 8;
+          print('DEBUG: Header starts at $headerStart');
 
           // Audio format (2 bytes) - should be 1 for PCM
           final audioFormat =
               (audioData[headerStart + 1] << 8) | audioData[headerStart];
+          print('DEBUG: Audio format: $audioFormat');
 
           // Number of channels (2 bytes)
           final numChannels =
               (audioData[headerStart + 3] << 8) | audioData[headerStart + 2];
           properties['channels'] = numChannels;
+          print('DEBUG: Channels: $numChannels');
 
           // Sample rate (4 bytes)
           final sampleRate =
@@ -637,6 +695,7 @@ class _SolariScreenState extends State<SolariScreen> {
               (audioData[headerStart + 5] << 8) |
               audioData[headerStart + 4];
           properties['sample_rate'] = sampleRate;
+          print('DEBUG: Sample rate: $sampleRate');
 
           // Byte rate (4 bytes)
           final byteRate =
@@ -649,9 +708,11 @@ class _SolariScreenState extends State<SolariScreen> {
           final bitsPerSample =
               (audioData[headerStart + 15] << 8) | audioData[headerStart + 14];
           properties['bit_depth'] = bitsPerSample;
+          print('DEBUG: Bits per sample: $bitsPerSample');
 
           // Calculate duration and data rate
           if (sampleRate > 0 && numChannels > 0 && bitsPerSample > 0) {
+            print('DEBUG: Looking for data chunk...');
             // Find 'data' chunk to get actual audio data size
             int dataIndex = -1;
             int dataSize = 0;
@@ -669,6 +730,7 @@ class _SolariScreenState extends State<SolariScreen> {
                     (audioData[i + 6] << 16) |
                     (audioData[i + 5] << 8) |
                     audioData[i + 4];
+                print('DEBUG: Found data chunk at index $i, size: $dataSize');
                 break;
               }
             }
@@ -677,6 +739,10 @@ class _SolariScreenState extends State<SolariScreen> {
               final bytesPerSample = bitsPerSample ~/ 8;
               final totalSamples = dataSize ~/ (numChannels * bytesPerSample);
               final durationSeconds = totalSamples / sampleRate;
+
+              print(
+                'DEBUG: bytesPerSample: $bytesPerSample, totalSamples: $totalSamples, duration: $durationSeconds',
+              );
 
               properties['duration_seconds'] = durationSeconds.toStringAsFixed(
                 2,
@@ -692,7 +758,13 @@ class _SolariScreenState extends State<SolariScreen> {
               } else {
                 properties['quality'] = 'Low';
               }
+            } else {
+              print('DEBUG: Data chunk not found!');
             }
+          } else {
+            print(
+              'DEBUG: Invalid audio parameters: sampleRate=$sampleRate, channels=$numChannels, bits=$bitsPerSample',
+            );
           }
 
           // Audio format description
@@ -702,9 +774,18 @@ class _SolariScreenState extends State<SolariScreen> {
             properties['encoding'] = 'Compressed (Format: $audioFormat)';
           }
         }
+      } else {
+        print(
+          'DEBUG: WAV signature not found or file too small. Size: ${audioData.length}',
+        );
+        if (audioData.length >= 12) {
+          print(
+            'DEBUG: Expected WAV signature, but got: ${audioData.take(12).map((b) => String.fromCharCode(b)).join('')}',
+          );
+        }
       }
       // Check for other audio formats
-      else if (audioData.length >= 4) {
+      if (audioData.length >= 4) {
         // MP3 signature
         if ((audioData[0] == 0xFF && (audioData[1] & 0xE0) == 0xE0) ||
             (audioData[0] == 0x49 &&
@@ -847,10 +928,15 @@ class _SolariScreenState extends State<SolariScreen> {
         // _endOperation('image_processing');
         return;
       }
+
+      // Don't process regular image commands if we're receiving VQA
+      if (_receivingVQA) {
+        return;
+      }
     }
 
-    // Add data to image buffer if receiving
-    if (_receivingImage) {
+    // Add data to image buffer if receiving (but not during VQA)
+    if (_receivingImage && !_receivingVQA) {
       _imageBuffer.addAll(value);
       // Progress will be shown in the progress bar widget, not in logs
       setState(() {}); // Trigger UI update for progress bar
@@ -903,10 +989,15 @@ class _SolariScreenState extends State<SolariScreen> {
         }
         return;
       }
+
+      // Don't process regular audio commands if we're receiving VQA
+      if (_receivingVQA) {
+        return;
+      }
     }
 
-    // Add data to audio buffer if receiving
-    if (_receivingAudio) {
+    // Add data to audio buffer if receiving (but not during VQA)
+    if (_receivingAudio && !_receivingVQA) {
       _audioBuffer.addAll(value);
       // Progress will be shown in the progress bar widget, not in logs
       setState(() {}); // Trigger UI update for progress bar
@@ -981,7 +1072,12 @@ class _SolariScreenState extends State<SolariScreen> {
                 sampleRate: properties['sample_rate'] ?? 0,
                 channels: properties['channels'] ?? 1,
                 bitDepth: properties['bit_depth'] ?? 16,
-                duration: (properties['duration_seconds'] ?? 0.0).toDouble(),
+                duration: properties['duration_seconds'] != null
+                    ? double.tryParse(
+                            properties['duration_seconds'].toString(),
+                          ) ??
+                          0.0
+                    : 0.0,
                 format: properties['format'] ?? 'Unknown',
                 compressionRatio: properties['compression_ratio']?.toDouble(),
               );
@@ -1040,6 +1136,350 @@ class _SolariScreenState extends State<SolariScreen> {
     }
 
     _endOperation('audio_finalization');
+  }
+
+  /// Process incoming VQA data with enhanced logging
+  void _processVQAData(List<int> value) {
+    // Check if data could be a text command
+    bool isTextCommand = false;
+    String dataStr = '';
+
+    // Only decode as UTF-8 if it looks like text (all bytes < 128)
+    if (value.every((byte) => byte < 128)) {
+      try {
+        dataStr = utf8.decode(value);
+        isTextCommand = true;
+      } catch (e) {
+        isTextCommand = false;
+      }
+    }
+
+    // Handle VQA text commands
+    if (isTextCommand) {
+      if (dataStr.startsWith('VQA_IMG_START:')) {
+        final sizeStr = dataStr.substring(14); // "VQA_IMG_START:".length = 14
+        try {
+          _vqaExpectedImageSize = int.parse(sizeStr);
+          _receivingVQA = true;
+          _vqaImageReceived = false;
+          _vqaAudioReceived = false;
+          _vqaImageBuffer.clear();
+          _vqaImageStartTime = DateTime.now();
+          if (_vqaStartTime == null) {
+            _vqaStartTime = DateTime.now();
+          }
+
+          _addLog(
+            'Starting VQA image reception: $_vqaExpectedImageSize bytes',
+            LogType.vqa,
+          );
+        } catch (e) {
+          _addLog('Invalid VQA image size: $sizeStr', LogType.error);
+        }
+        return;
+      }
+
+      if (dataStr == 'VQA_IMG_END') {
+        if (_receivingVQA && !_vqaImageReceived) {
+          _addLog('Received VQA_IMG_END signal', LogType.vqa);
+          _finishVQAImageReception();
+        }
+        return;
+      }
+
+      if (dataStr.startsWith('VQA_AUD_START:')) {
+        final sizeStr = dataStr.substring(14); // "VQA_AUD_START:".length = 14
+        try {
+          _vqaExpectedAudioSize = int.parse(sizeStr);
+          _vqaAudioBuffer.clear();
+          _vqaAudioStartTime = DateTime.now();
+
+          _addLog(
+            'Starting VQA audio reception: $_vqaExpectedAudioSize bytes',
+            LogType.vqa,
+          );
+        } catch (e) {
+          _addLog('Invalid VQA audio size: $sizeStr', LogType.error);
+        }
+        return;
+      }
+
+      if (dataStr == 'VQA_AUD_END') {
+        if (_receivingVQA && _vqaImageReceived && !_vqaAudioReceived) {
+          _addLog('Received VQA_AUD_END signal', LogType.vqa);
+          _finishVQAAudioReception();
+        }
+        return;
+      }
+
+      if (dataStr == 'VQA_COMPLETE') {
+        if (_receivingVQA) {
+          _addLog('Received VQA_COMPLETE signal', LogType.vqa);
+          _finishVQAReception();
+        }
+        return;
+      }
+    }
+
+    // Add data to appropriate VQA buffer if receiving
+    if (_receivingVQA) {
+      if (!_vqaImageReceived) {
+        // Currently receiving VQA image
+        _vqaImageBuffer.addAll(value);
+        setState(() {}); // Trigger UI update for progress bar
+        _autoScrollToBottom();
+      } else if (_vqaImageReceived && !_vqaAudioReceived) {
+        // Currently receiving VQA audio
+        _vqaAudioBuffer.addAll(value);
+        setState(() {}); // Trigger UI update for progress bar
+        _autoScrollToBottom();
+      }
+    }
+  }
+
+  /// Finish VQA image reception
+  void _finishVQAImageReception() {
+    _startOperation('vqa_image_finalization');
+
+    try {
+      final actualSize = _vqaImageBuffer.length;
+      final transferDuration = _vqaImageStartTime != null
+          ? DateTime.now().difference(_vqaImageStartTime!)
+          : null;
+
+      final imageData = Uint8List.fromList(_vqaImageBuffer);
+
+      final sizeInfo = actualSize == _vqaExpectedImageSize
+          ? 'Size: ${actualSize}B'
+          : 'Size: ${actualSize}B (expected: $_vqaExpectedImageSize)';
+
+      final speedInfo = transferDuration != null && actualSize > 0
+          ? ' - Speed: ${(actualSize / transferDuration.inMilliseconds * 1000 / 1024).toStringAsFixed(2)} KB/s'
+          : '';
+
+      // Analyze image properties
+      _analyzeImageProperties(imageData)
+          .then((properties) {
+            _vqaImageData = imageData;
+            _vqaImageProperties = properties;
+            _vqaImageReceived = true;
+
+            String propertiesInfo = '';
+            if (properties['format'] != 'Unknown') {
+              propertiesInfo = ' | Format: ${properties['format']}';
+              if (properties['width'] != null && properties['height'] != null) {
+                propertiesInfo +=
+                    ' | Dimensions: ${properties['width']}x${properties['height']}';
+              }
+            }
+
+            _addLog(
+              'VQA image received! $sizeInfo$speedInfo$propertiesInfo',
+              LogType.vqa,
+              dataSize: actualSize,
+              duration: transferDuration,
+            );
+          })
+          .catchError((error) {
+            _vqaImageData = imageData;
+            _vqaImageReceived = true;
+            _addLog(
+              'VQA image received! $sizeInfo$speedInfo | Analysis failed: $error',
+              LogType.vqa,
+              dataSize: actualSize,
+              duration: transferDuration,
+            );
+          });
+    } catch (e) {
+      _addLog('Failed to process VQA image: $e', LogType.error);
+    }
+
+    _endOperation('vqa_image_finalization');
+  }
+
+  /// Finish VQA audio reception
+  void _finishVQAAudioReception() {
+    _startOperation('vqa_audio_finalization');
+
+    try {
+      final actualSize = _vqaAudioBuffer.length;
+      final transferDuration = _vqaAudioStartTime != null
+          ? DateTime.now().difference(_vqaAudioStartTime!)
+          : null;
+
+      final audioData = Uint8List.fromList(_vqaAudioBuffer);
+
+      final sizeInfo = actualSize == _vqaExpectedAudioSize
+          ? 'Size: ${actualSize}B'
+          : 'Size: ${actualSize}B (expected: $_vqaExpectedAudioSize)';
+
+      final speedInfo = transferDuration != null && actualSize > 0
+          ? ' - Speed: ${(actualSize / transferDuration.inMilliseconds * 1000 / 1024).toStringAsFixed(2)} KB/s'
+          : '';
+
+      // Analyze audio properties
+      _analyzeAudioProperties(audioData)
+          .then((properties) {
+            String propertiesInfo = '';
+            AudioProperties audioProperties;
+
+            if (properties['format'] != 'Unknown') {
+              propertiesInfo = ' | Format: ${properties['format']}';
+              if (properties['sample_rate'] != null) {
+                propertiesInfo +=
+                    ' | Sample Rate: ${properties['sample_rate']} Hz';
+              }
+              if (properties['channels'] != null) {
+                propertiesInfo += ' | Channels: ${properties['channels']}';
+              }
+              if (properties['duration_seconds'] != null) {
+                propertiesInfo +=
+                    ' | Duration: ${properties['duration_seconds']}s';
+              }
+
+              audioProperties = AudioProperties(
+                sampleRate: properties['sample_rate'] ?? 0,
+                channels: properties['channels'] ?? 1,
+                bitDepth: properties['bit_depth'] ?? 16,
+                duration: properties['duration_seconds'] != null
+                    ? double.tryParse(
+                            properties['duration_seconds'].toString(),
+                          ) ??
+                          0.0
+                    : 0.0,
+                format: properties['format'] ?? 'Unknown',
+                compressionRatio: properties['compression_ratio']?.toDouble(),
+              );
+            } else {
+              audioProperties = AudioProperties(
+                sampleRate: 44100,
+                channels: 1,
+                bitDepth: 16,
+                duration: 0.0,
+                format: 'Unknown',
+              );
+            }
+
+            _vqaAudioData = AudioData(
+              data: audioData,
+              properties: audioProperties,
+            );
+            _vqaAudioProperties = properties;
+            _vqaAudioReceived = true;
+
+            _addLog(
+              'VQA audio received! $sizeInfo$speedInfo$propertiesInfo',
+              LogType.vqa,
+              dataSize: actualSize,
+              duration: transferDuration,
+            );
+          })
+          .catchError((error) {
+            final defaultProperties = AudioProperties(
+              sampleRate: 44100,
+              channels: 1,
+              bitDepth: 16,
+              duration: 0.0,
+              format: 'Unknown',
+            );
+
+            _vqaAudioData = AudioData(
+              data: audioData,
+              properties: defaultProperties,
+            );
+            _vqaAudioReceived = true;
+
+            _addLog(
+              'VQA audio received! $sizeInfo$speedInfo | Analysis failed: $error',
+              LogType.vqa,
+              dataSize: actualSize,
+              duration: transferDuration,
+            );
+          });
+    } catch (e) {
+      _addLog('Failed to process VQA audio: $e', LogType.error);
+    }
+
+    _endOperation('vqa_audio_finalization');
+  }
+
+  /// Finish complete VQA reception
+  void _finishVQAReception() {
+    _startOperation('vqa_complete_finalization');
+
+    try {
+      final totalDuration = _vqaStartTime != null
+          ? DateTime.now().difference(_vqaStartTime!)
+          : null;
+
+      // Create VQA data object
+      final vqaData = VQAData(
+        imageData: _vqaImageData,
+        audioData: _vqaAudioData,
+        timestamp: DateTime.now(),
+        imageProperties: _vqaImageProperties,
+        audioProperties: _vqaAudioProperties,
+      );
+
+      final imageSize = _vqaImageData?.length ?? 0;
+      final audioSize = _vqaAudioData?.data.length ?? 0;
+      final totalSize = imageSize + audioSize;
+
+      String completionInfo = 'VQA operation completed!';
+      if (vqaData.isComplete) {
+        completionInfo +=
+            ' | Image: ${imageSize}B | Audio: ${audioSize}B | Total: ${totalSize}B';
+
+        if (totalDuration != null) {
+          final totalSpeed = totalSize > 0
+              ? (totalSize / totalDuration.inMilliseconds * 1000 / 1024)
+                    .toStringAsFixed(2)
+              : '0.0';
+          completionInfo +=
+              ' | Total Time: ${totalDuration.inMilliseconds}ms | Avg Speed: ${totalSpeed} KB/s';
+        }
+      } else {
+        completionInfo += ' | Warning: Incomplete data received';
+        if (!vqaData.hasImage) completionInfo += ' (missing image)';
+        if (!vqaData.hasAudio) completionInfo += ' (missing audio)';
+      }
+
+      _addLog(
+        completionInfo,
+        LogType.vqa,
+        dataSize: totalSize,
+        duration: totalDuration,
+        vqaData: vqaData,
+      );
+
+      // Reset VQA state
+      setState(() {
+        _receivingVQA = false;
+        _vqaImageReceived = false;
+        _vqaAudioReceived = false;
+        _vqaImageData = null;
+        _vqaAudioData = null;
+        _vqaImageProperties = null;
+        _vqaAudioProperties = null;
+        _vqaStartTime = null;
+        _vqaExpectedImageSize = 0;
+        _vqaExpectedAudioSize = 0;
+        _vqaImageBuffer.clear();
+        _vqaAudioBuffer.clear();
+        _vqaImageStartTime = null;
+        _vqaAudioStartTime = null;
+      });
+    } catch (e) {
+      _addLog('Failed to finalize VQA operation: $e', LogType.error);
+      // Reset state even on error
+      setState(() {
+        _receivingVQA = false;
+        _vqaImageReceived = false;
+        _vqaAudioReceived = false;
+      });
+    }
+
+    _endOperation('vqa_complete_finalization');
   }
 
   /// Finish image reception with timing information
@@ -1143,47 +1583,48 @@ class _SolariScreenState extends State<SolariScreen> {
 
     _startOperation('notification_setup');
     try {
-      _notificationSubscription = _targetCharacteristic!.lastValueStream.listen(
-        (value) {
-          final receiveTime = DateTime.now();
+      _notificationSubscription = _targetCharacteristic!.lastValueStream.listen((
+        value,
+      ) {
+        final receiveTime = DateTime.now();
 
-          // Enhanced echo detection
-          bool isEcho = false;
-          if (_lastSentData != null && _lastSentTime != null) {
-            final timeSinceSent = receiveTime
-                .difference(_lastSentTime!)
-                .inMilliseconds;
-            if (_areListsEqual(value, _lastSentData!) &&
-                timeSinceSent < kMaxEchoDetectionWindow) {
-              isEcho = true;
-              _addLog(
-                'Echo detected (${timeSinceSent}ms delay)',
-                LogType.timing,
-                dataSize: value.length,
-              );
-            }
+        // Enhanced echo detection
+        bool isEcho = false;
+        if (_lastSentData != null && _lastSentTime != null) {
+          final timeSinceSent = receiveTime
+              .difference(_lastSentTime!)
+              .inMilliseconds;
+          if (_areListsEqual(value, _lastSentData!) &&
+              timeSinceSent < kMaxEchoDetectionWindow) {
+            isEcho = true;
+            _addLog(
+              'Echo detected (${timeSinceSent}ms delay)',
+              LogType.timing,
+              dataSize: value.length,
+            );
           }
+        }
 
-          if (!isEcho) {
-            // Skip logging individual chunks during image or audio transfer
-            if (!_receivingImage && !_receivingAudio) {
-              String notification;
-              try {
-                notification = utf8.decode(value);
-              } catch (e) {
-                // Show truncated binary data in RCV log
-                notification = 'Binary data: ${_truncateBinaryData(value)}';
-              }
-
-              _addLog(notification, LogType.received, dataSize: value.length);
+        if (!isEcho) {
+          // Skip logging individual chunks during image, audio, or VQA transfer
+          if (!_receivingImage && !_receivingAudio && !_receivingVQA) {
+            String notification;
+            try {
+              notification = utf8.decode(value);
+            } catch (e) {
+              // Show truncated binary data in RCV log
+              notification = 'Binary data: ${_truncateBinaryData(value)}';
             }
 
-            // Process both image and audio data
-            _processImageData(value);
-            _processAudioData(value);
+            _addLog(notification, LogType.received, dataSize: value.length);
           }
-        },
-      );
+
+          // Process image, audio, and VQA data
+          _processImageData(value);
+          _processAudioData(value);
+          _processVQAData(value);
+        }
+      });
 
       setState(() {
         _isSubscribed = true;
@@ -1315,6 +1756,42 @@ class _SolariScreenState extends State<SolariScreen> {
   double get _imageProgress {
     if (!_receivingImage || _expectedImageSize <= 0) return 0.0;
     return (_imageBuffer.length / _expectedImageSize).clamp(0.0, 1.0);
+  }
+
+  /// Get current audio transfer progress (0.0 to 1.0)
+  double get _audioProgress {
+    if (!_receivingAudio || _expectedAudioSize <= 0) return 0.0;
+    return (_audioBuffer.length / _expectedAudioSize).clamp(0.0, 1.0);
+  }
+
+  /// Get current VQA image transfer progress (0.0 to 1.0)
+  double get _vqaImageProgress {
+    if (!_receivingVQA || _vqaImageReceived || _vqaExpectedImageSize <= 0)
+      return 0.0;
+    return (_vqaImageBuffer.length / _vqaExpectedImageSize).clamp(0.0, 1.0);
+  }
+
+  /// Get current VQA audio transfer progress (0.0 to 1.0)
+  double get _vqaAudioProgress {
+    if (!_receivingVQA ||
+        !_vqaImageReceived ||
+        _vqaAudioReceived ||
+        _vqaExpectedAudioSize <= 0)
+      return 0.0;
+    return (_vqaAudioBuffer.length / _vqaExpectedAudioSize).clamp(0.0, 1.0);
+  }
+
+  /// Get VQA overall progress description
+  String get _vqaProgressDescription {
+    if (!_receivingVQA) return '';
+
+    if (!_vqaImageReceived) {
+      return 'Receiving VQA image...';
+    } else if (!_vqaAudioReceived) {
+      return 'Receiving VQA audio...';
+    } else {
+      return 'Finalizing VQA...';
+    }
   }
 
   @override
@@ -1475,61 +1952,202 @@ class _SolariScreenState extends State<SolariScreen> {
               decoration: BoxDecoration(border: Border.all(color: Colors.grey)),
               child: ListView.builder(
                 controller: _scrollController,
-                itemCount: _logEntries.length + (_receivingImage ? 1 : 0),
+                itemCount:
+                    _logEntries.length +
+                    (_receivingImage ? 1 : 0) +
+                    (_receivingAudio ? 1 : 0) +
+                    (_receivingVQA ? 1 : 0),
                 itemBuilder: (context, index) {
-                  // Show progress bar as the last item when receiving image
-                  if (_receivingImage && index == _logEntries.length) {
-                    final percentage = (_imageProgress * 100).toStringAsFixed(
-                      1,
-                    );
-                    final progressText =
-                        '$percentage% (${_imageBuffer.length}/${_expectedImageSize} bytes)';
-                    final now = DateTime.now();
-                    final timeStr =
-                        '${now.hour.toString().padLeft(2, '0')}:'
-                        '${now.minute.toString().padLeft(2, '0')}:'
-                        '${now.second.toString().padLeft(2, '0')}.'
-                        '${now.millisecond.toString().padLeft(3, '0')}';
+                  // Show progress bars as the last items when receiving data
 
-                    return Container(
-                      margin: const EdgeInsets.symmetric(
-                        vertical: 1,
-                        horizontal: 4,
-                      ),
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: Colors.blue[50],
-                        borderRadius: BorderRadius.circular(3),
-                        border: Border.all(
-                          color: Colors.blue.withOpacity(0.3),
-                          width: 0.5,
+                  if (index >= _logEntries.length) {
+                    final progressIndex = index - _logEntries.length;
+
+                    // VQA progress bar (show first if active)
+                    if (_receivingVQA && progressIndex == 0) {
+                      final now = DateTime.now();
+                      final timeStr =
+                          '${now.hour.toString().padLeft(2, '0')}:'
+                          '${now.minute.toString().padLeft(2, '0')}:'
+                          '${now.second.toString().padLeft(2, '0')}.'
+                          '${now.millisecond.toString().padLeft(3, '0')}';
+
+                      String progressText;
+                      double progressValue;
+                      Color progressColor;
+
+                      if (!_vqaImageReceived) {
+                        // Show VQA image progress
+                        final percentage = (_vqaImageProgress * 100)
+                            .toStringAsFixed(1);
+                        progressText =
+                            'VQA Image: $percentage% (${_vqaImageBuffer.length}/${_vqaExpectedImageSize} bytes)';
+                        progressValue = _vqaImageProgress;
+                        progressColor = Colors.deepPurple;
+                      } else if (!_vqaAudioReceived) {
+                        // Show VQA audio progress
+                        final percentage = (_vqaAudioProgress * 100)
+                            .toStringAsFixed(1);
+                        progressText =
+                            'VQA Audio: $percentage% (${_vqaAudioBuffer.length}/${_vqaExpectedAudioSize} bytes)';
+                        progressValue = _vqaAudioProgress;
+                        progressColor = Colors.deepPurple;
+                      } else {
+                        // Finalizing
+                        progressText = 'Finalizing VQA operation...';
+                        progressValue = 1.0;
+                        progressColor = Colors.deepPurple;
+                      }
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(
+                          vertical: 1,
+                          horizontal: 4,
                         ),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Header with timestamp like other log entries
-                          Text(
-                            '$timeStr [PROGRESS] Receiving image... $progressText',
-                            style: TextStyle(
-                              fontSize: 8,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.blue[800],
-                              fontFamily: 'monospace',
-                            ),
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.deepPurple[50],
+                          borderRadius: BorderRadius.circular(3),
+                          border: Border.all(
+                            color: Colors.deepPurple.withOpacity(0.3),
+                            width: 0.5,
                           ),
-                          const SizedBox(height: 4),
-                          LinearProgressIndicator(
-                            value: _imageProgress,
-                            backgroundColor: Colors.blue[100],
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              Colors.blue[600]!,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '$timeStr [VQA-PROGRESS] $progressText',
+                              style: TextStyle(
+                                fontSize: 8,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.deepPurple[800],
+                                fontFamily: 'monospace',
+                              ),
                             ),
-                            minHeight: 3,
+                            const SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: progressValue,
+                              backgroundColor: Colors.deepPurple[100],
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                progressColor,
+                              ),
+                              minHeight: 3,
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+
+                    // Image progress bar
+                    if (_receivingImage &&
+                        ((!_receivingVQA && progressIndex == 0) ||
+                            (_receivingVQA && progressIndex == 1))) {
+                      final percentage = (_imageProgress * 100).toStringAsFixed(
+                        1,
+                      );
+                      final progressText =
+                          '$percentage% (${_imageBuffer.length}/${_expectedImageSize} bytes)';
+                      final now = DateTime.now();
+                      final timeStr =
+                          '${now.hour.toString().padLeft(2, '0')}:'
+                          '${now.minute.toString().padLeft(2, '0')}:'
+                          '${now.second.toString().padLeft(2, '0')}.'
+                          '${now.millisecond.toString().padLeft(3, '0')}';
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(
+                          vertical: 1,
+                          horizontal: 4,
+                        ),
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.blue[50],
+                          borderRadius: BorderRadius.circular(3),
+                          border: Border.all(
+                            color: Colors.blue.withOpacity(0.3),
+                            width: 0.5,
                           ),
-                        ],
-                      ),
-                    );
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '$timeStr [IMG-PROGRESS] Receiving image... $progressText',
+                              style: TextStyle(
+                                fontSize: 8,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.blue[800],
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: _imageProgress,
+                              backgroundColor: Colors.blue[100],
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.blue[600]!,
+                              ),
+                              minHeight: 3,
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+
+                    // Audio progress bar
+                    if (_receivingAudio) {
+                      final percentage = (_audioProgress * 100).toStringAsFixed(
+                        1,
+                      );
+                      final progressText =
+                          '$percentage% (${_audioBuffer.length}/${_expectedAudioSize} bytes)';
+                      final now = DateTime.now();
+                      final timeStr =
+                          '${now.hour.toString().padLeft(2, '0')}:'
+                          '${now.minute.toString().padLeft(2, '0')}:'
+                          '${now.second.toString().padLeft(2, '0')}.'
+                          '${now.millisecond.toString().padLeft(3, '0')}';
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(
+                          vertical: 1,
+                          horizontal: 4,
+                        ),
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.cyan[50],
+                          borderRadius: BorderRadius.circular(3),
+                          border: Border.all(
+                            color: Colors.cyan.withOpacity(0.3),
+                            width: 0.5,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '$timeStr [AUD-PROGRESS] Receiving audio... $progressText',
+                              style: TextStyle(
+                                fontSize: 8,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.cyan[800],
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: _audioProgress,
+                              backgroundColor: Colors.cyan[100],
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.cyan[600]!,
+                              ),
+                              minHeight: 3,
+                            ),
+                          ],
+                        ),
+                      );
+                    }
                   }
 
                   final entry = _logEntries[index];
@@ -1562,42 +2180,115 @@ class _SolariScreenState extends State<SolariScreen> {
                         if (entry.imageData != null)
                           Container(
                             margin: const EdgeInsets.only(top: 4),
-                            width: double.infinity,
+                            padding: const EdgeInsets.all(4),
                             decoration: BoxDecoration(
-                              border: Border.all(color: Colors.grey.shade400),
+                              color: Colors.indigo.withOpacity(0.1),
+                              border: Border.all(
+                                color: Colors.indigo.withOpacity(0.3),
+                              ),
                               borderRadius: BorderRadius.circular(4),
                             ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: Image.memory(
-                                entry.imageData!,
-                                width: double.infinity,
-                                fit: BoxFit.fitWidth,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return Container(
-                                    color: Colors.grey.shade100,
-                                    height: 60,
-                                    child: const Center(
-                                      child: Column(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          Icon(
-                                            Icons.error,
-                                            color: Colors.red,
-                                            size: 12,
-                                          ),
-                                          SizedBox(height: 2),
-                                          Text(
-                                            'Invalid image',
-                                            style: TextStyle(fontSize: 8),
-                                          ),
-                                        ],
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Image Header
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.image,
+                                      color: Colors.indigo,
+                                      size: 16,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'Image Data',
+                                      style: TextStyle(
+                                        color: Colors.indigo,
+                                        fontSize: 8,
+                                        fontWeight: FontWeight.bold,
                                       ),
                                     ),
-                                  );
-                                },
-                              ),
+                                    Spacer(),
+                                    Text(
+                                      '${(entry.imageData!.length / 1024).toStringAsFixed(1)} KB',
+                                      style: TextStyle(
+                                        color: Colors.indigo.withOpacity(0.7),
+                                        fontSize: 7,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                SizedBox(height: 4),
+
+                                // Image Display
+                                Container(
+                                  width: double.infinity,
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color: Colors.grey.shade400,
+                                    ),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: Image.memory(
+                                      entry.imageData!,
+                                      width: double.infinity,
+                                      fit: BoxFit.fitWidth,
+                                      errorBuilder:
+                                          (context, error, stackTrace) {
+                                            return Container(
+                                              color: Colors.grey.shade100,
+                                              height: 60,
+                                              child: const Center(
+                                                child: Column(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment.center,
+                                                  children: [
+                                                    Icon(
+                                                      Icons.error,
+                                                      color: Colors.red,
+                                                      size: 12,
+                                                    ),
+                                                    SizedBox(height: 2),
+                                                    Text(
+                                                      'Invalid image format',
+                                                      style: TextStyle(
+                                                        fontSize: 8,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                    ),
+                                  ),
+                                ),
+
+                                // Image metadata footer
+                                SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.info_outline,
+                                      color: Colors.indigo.withOpacity(0.6),
+                                      size: 10,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        'Size: ${entry.imageData!.length} bytes | Format: JPEG/PNG',
+                                        style: TextStyle(
+                                          color: Colors.indigo.withOpacity(0.7),
+                                          fontSize: 6,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
                         // Show audio controls inline if this log entry contains audio data
@@ -1612,73 +2303,435 @@ class _SolariScreenState extends State<SolariScreen> {
                               ),
                               borderRadius: BorderRadius.circular(4),
                             ),
-                            child: Row(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                IconButton(
-                                  icon: Icon(
-                                    _isAudioPlaying
-                                        ? Icons.pause
-                                        : Icons.play_arrow,
-                                    color: Colors.cyan,
-                                    size: 16,
-                                  ),
-                                  onPressed: () async {
-                                    if (_isAudioPlaying) {
-                                      await _audioPlayer.pause();
-                                    } else {
-                                      await _playAudioData(entry.audioData!);
-                                    }
-                                  },
-                                  constraints: BoxConstraints(
-                                    minWidth: 24,
-                                    minHeight: 24,
-                                  ),
-                                  padding: EdgeInsets.all(2),
+                                // Audio Header
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.audiotrack,
+                                      color: Colors.cyan,
+                                      size: 16,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'Audio Data',
+                                      style: TextStyle(
+                                        color: Colors.cyan,
+                                        fontSize: 8,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    Spacer(),
+                                    Text(
+                                      '${(entry.audioData!.data.length / 1024).toStringAsFixed(1)} KB',
+                                      style: TextStyle(
+                                        color: Colors.cyan.withOpacity(0.7),
+                                        fontSize: 7,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                IconButton(
-                                  icon: Icon(
-                                    Icons.stop,
-                                    color: Colors.cyan,
-                                    size: 16,
+                                SizedBox(height: 4),
+
+                                // Audio Controls
+                                Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.cyan.withOpacity(0.05),
+                                    border: Border.all(
+                                      color: Colors.cyan.withOpacity(0.2),
+                                    ),
+                                    borderRadius: BorderRadius.circular(4),
                                   ),
-                                  onPressed: () async {
-                                    await _audioPlayer.stop();
-                                    setState(() {
-                                      _isAudioPlaying = false;
-                                    });
-                                  },
-                                  constraints: BoxConstraints(
-                                    minWidth: 24,
-                                    minHeight: 24,
+                                  child: Row(
+                                    children: [
+                                      IconButton(
+                                        icon: Icon(
+                                          _isAudioPlaying
+                                              ? Icons.pause
+                                              : Icons.play_arrow,
+                                          color: Colors.cyan,
+                                          size: 16,
+                                        ),
+                                        onPressed: () async {
+                                          if (_isAudioPlaying) {
+                                            await _audioPlayer.pause();
+                                          } else {
+                                            await _playAudioData(
+                                              entry.audioData!,
+                                            );
+                                          }
+                                        },
+                                        constraints: BoxConstraints(
+                                          minWidth: 24,
+                                          minHeight: 24,
+                                        ),
+                                        padding: EdgeInsets.all(2),
+                                        tooltip: 'Play/Pause Audio',
+                                      ),
+                                      IconButton(
+                                        icon: Icon(
+                                          Icons.stop,
+                                          color: Colors.cyan,
+                                          size: 16,
+                                        ),
+                                        onPressed: () async {
+                                          await _audioPlayer.stop();
+                                          setState(() {
+                                            _isAudioPlaying = false;
+                                          });
+                                        },
+                                        constraints: BoxConstraints(
+                                          minWidth: 24,
+                                          minHeight: 24,
+                                        ),
+                                        padding: EdgeInsets.all(2),
+                                        tooltip: 'Stop Audio',
+                                      ),
+                                      SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Row(
+                                              children: [
+                                                Icon(
+                                                  Icons.timer,
+                                                  color: Colors.cyan,
+                                                  size: 10,
+                                                ),
+                                                SizedBox(width: 2),
+                                                Text(
+                                                  '${entry.audioData!.properties.duration.toStringAsFixed(1)}s',
+                                                  style: TextStyle(
+                                                    color: Colors.cyan,
+                                                    fontSize: 7,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                                Spacer(),
+                                                Icon(
+                                                  Icons.high_quality,
+                                                  color: Colors.cyan
+                                                      .withOpacity(0.7),
+                                                  size: 10,
+                                                ),
+                                                SizedBox(width: 2),
+                                                Text(
+                                                  '${entry.audioData!.properties.format}',
+                                                  style: TextStyle(
+                                                    color: Colors.cyan
+                                                        .withOpacity(0.8),
+                                                    fontSize: 6,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                            SizedBox(height: 2),
+                                            Row(
+                                              children: [
+                                                Icon(
+                                                  Icons.graphic_eq,
+                                                  color: Colors.cyan
+                                                      .withOpacity(0.7),
+                                                  size: 10,
+                                                ),
+                                                SizedBox(width: 2),
+                                                Expanded(
+                                                  child: Text(
+                                                    '${entry.audioData!.properties.sampleRate}Hz • '
+                                                    '${entry.audioData!.properties.channels} ch • '
+                                                    '${entry.audioData!.properties.bitDepth}-bit',
+                                                    style: TextStyle(
+                                                      color: Colors.cyan
+                                                          .withOpacity(0.8),
+                                                      fontSize: 6,
+                                                    ),
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  padding: EdgeInsets.all(2),
                                 ),
-                                SizedBox(width: 8),
-                                Expanded(
-                                  child: Column(
+
+                                // Audio metadata footer
+                                SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.info_outline,
+                                      color: Colors.cyan.withOpacity(0.6),
+                                      size: 10,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        'Size: ${entry.audioData!.data.length} bytes | Encoding: ${entry.audioData!.properties.format}',
+                                        style: TextStyle(
+                                          color: Colors.cyan.withOpacity(0.7),
+                                          fontSize: 6,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        // Show VQA data inline if this log entry contains VQA data
+                        if (entry.vqaData != null)
+                          Container(
+                            margin: const EdgeInsets.only(top: 4),
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.deepPurple.withOpacity(0.1),
+                              border: Border.all(
+                                color: Colors.deepPurple.withOpacity(0.3),
+                              ),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // VQA Header
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.auto_awesome,
+                                      color: Colors.deepPurple,
+                                      size: 16,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'VQA Data (Visual Question Answering)',
+                                      style: TextStyle(
+                                        color: Colors.deepPurple,
+                                        fontSize: 8,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    Spacer(),
+                                    if (entry.vqaData!.isComplete)
+                                      Icon(
+                                        Icons.check_circle,
+                                        color: Colors.green,
+                                        size: 12,
+                                      )
+                                    else
+                                      Icon(
+                                        Icons.warning,
+                                        color: Colors.orange,
+                                        size: 12,
+                                      ),
+                                  ],
+                                ),
+                                SizedBox(height: 4),
+
+                                // VQA Image
+                                if (entry.vqaData!.hasImage)
+                                  Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        '🎵 Audio: ${entry.audioData!.properties.duration.toStringAsFixed(1)}s',
+                                        '📷 Image Data:',
                                         style: TextStyle(
-                                          color: Colors.cyan,
+                                          color: Colors.deepPurple,
                                           fontSize: 7,
                                           fontWeight: FontWeight.bold,
                                         ),
                                       ),
-                                      Text(
-                                        '${entry.audioData!.properties.sampleRate}Hz, '
-                                        '${entry.audioData!.properties.channels} ch, '
-                                        '${entry.audioData!.properties.bitDepth}-bit',
-                                        style: TextStyle(
-                                          color: Colors.cyan.withOpacity(0.8),
-                                          fontSize: 6,
+                                      SizedBox(height: 2),
+                                      Container(
+                                        width: double.infinity,
+                                        decoration: BoxDecoration(
+                                          border: Border.all(
+                                            color: Colors.grey.shade400,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
                                         ),
-                                        overflow: TextOverflow.ellipsis,
+                                        child: ClipRRect(
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
+                                          child: Image.memory(
+                                            entry.vqaData!.imageData!,
+                                            width: double.infinity,
+                                            fit: BoxFit.fitWidth,
+                                            errorBuilder:
+                                                (context, error, stackTrace) {
+                                                  return Container(
+                                                    color: Colors.grey.shade100,
+                                                    height: 60,
+                                                    child: const Center(
+                                                      child: Column(
+                                                        mainAxisAlignment:
+                                                            MainAxisAlignment
+                                                                .center,
+                                                        children: [
+                                                          Icon(
+                                                            Icons.error,
+                                                            color: Colors.red,
+                                                            size: 12,
+                                                          ),
+                                                          SizedBox(height: 2),
+                                                          Text(
+                                                            'Invalid VQA image',
+                                                            style: TextStyle(
+                                                              fontSize: 8,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  );
+                                                },
+                                          ),
+                                        ),
+                                      ),
+                                      SizedBox(height: 4),
+                                    ],
+                                  ),
+
+                                // VQA Audio
+                                if (entry.vqaData!.hasAudio)
+                                  Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '🎵 Audio Data:',
+                                        style: TextStyle(
+                                          color: Colors.deepPurple,
+                                          fontSize: 7,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      SizedBox(height: 2),
+                                      Container(
+                                        padding: const EdgeInsets.all(4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.deepPurple.withOpacity(
+                                            0.05,
+                                          ),
+                                          border: Border.all(
+                                            color: Colors.deepPurple
+                                                .withOpacity(0.2),
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            IconButton(
+                                              icon: Icon(
+                                                _isAudioPlaying
+                                                    ? Icons.pause
+                                                    : Icons.play_arrow,
+                                                color: Colors.deepPurple,
+                                                size: 16,
+                                              ),
+                                              onPressed: () async {
+                                                if (_isAudioPlaying) {
+                                                  await _audioPlayer.pause();
+                                                } else {
+                                                  await _playAudioData(
+                                                    entry.vqaData!.audioData!,
+                                                  );
+                                                }
+                                              },
+                                              constraints: BoxConstraints(
+                                                minWidth: 24,
+                                                minHeight: 24,
+                                              ),
+                                              padding: EdgeInsets.all(2),
+                                            ),
+                                            IconButton(
+                                              icon: Icon(
+                                                Icons.stop,
+                                                color: Colors.deepPurple,
+                                                size: 16,
+                                              ),
+                                              onPressed: () async {
+                                                await _audioPlayer.stop();
+                                                setState(() {
+                                                  _isAudioPlaying = false;
+                                                });
+                                              },
+                                              constraints: BoxConstraints(
+                                                minWidth: 24,
+                                                minHeight: 24,
+                                              ),
+                                              padding: EdgeInsets.all(2),
+                                            ),
+                                            SizedBox(width: 8),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    'Duration: ${entry.vqaData!.audioData!.properties.duration.toStringAsFixed(1)}s',
+                                                    style: TextStyle(
+                                                      color: Colors.deepPurple,
+                                                      fontSize: 6,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                    ),
+                                                  ),
+                                                  Text(
+                                                    '${entry.vqaData!.audioData!.properties.sampleRate}Hz, '
+                                                    '${entry.vqaData!.audioData!.properties.channels} ch, '
+                                                    '${entry.vqaData!.audioData!.properties.bitDepth}-bit',
+                                                    style: TextStyle(
+                                                      color: Colors.deepPurple
+                                                          .withOpacity(0.8),
+                                                      fontSize: 6,
+                                                    ),
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
+                                        ),
                                       ),
                                     ],
                                   ),
+
+                                // Status and metadata
+                                SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Status: ${entry.vqaData!.isComplete ? "Complete" : "Incomplete"} | '
+                                        'Image: ${entry.vqaData!.hasImage ? "✓" : "✗"} | '
+                                        'Audio: ${entry.vqaData!.hasAudio ? "✓" : "✗"}',
+                                        style: TextStyle(
+                                          color: Colors.deepPurple.withOpacity(
+                                            0.7,
+                                          ),
+                                          fontSize: 6,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
