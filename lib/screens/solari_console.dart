@@ -183,13 +183,13 @@ class _SolariScreenState extends State<SolariScreen> {
   bool _receivingVQA = false;
   bool _vqaImageReceived = false;
   bool _vqaAudioReceived = false;
+  bool _receivingVQAAudio = false; // New state for tracking audio streaming
   Uint8List? _vqaImageData;
   AudioData? _vqaAudioData;
   Map<String, dynamic>? _vqaImageProperties;
   Map<String, dynamic>? _vqaAudioProperties;
   DateTime? _vqaStartTime;
   int _vqaExpectedImageSize = 0;
-  int _vqaExpectedAudioSize = 0;
   final List<int> _vqaImageBuffer = [];
   final List<int> _vqaAudioBuffer = [];
   DateTime? _vqaImageStartTime;
@@ -211,7 +211,7 @@ class _SolariScreenState extends State<SolariScreen> {
   static const String kTargetCharacteristicUUID =
       "beb5483e-36e1-4688-b7f5-ea07361b26a8";
   static const int kMaxEchoDetectionWindow = 1000; // milliseconds
-  static const int kRequestedMtu = 512;
+  static const int kRequestedMtu = 517;
   static const int kBleOverhead = 3;
 
   @override
@@ -846,13 +846,113 @@ class _SolariScreenState extends State<SolariScreen> {
     try {
       _addLog('Playing audio...', LogType.audio);
 
+      // Check if the audio data is already a complete audio file (has proper header)
+      Uint8List audioToPlay;
+
+      if (_isCompleteAudioFile(audioData.data)) {
+        // Data already has proper audio file format
+        audioToPlay = audioData.data;
+        _addLog('Playing audio file with existing format', LogType.audio);
+      } else {
+        // Raw PCM data - convert to WAV format
+        audioToPlay = _convertPcmToWav(
+          audioData.data,
+          audioData.properties.sampleRate,
+          audioData.properties.channels,
+          audioData.properties.bitDepth,
+        );
+        _addLog('Converted raw PCM to WAV format for playback', LogType.audio);
+      }
+
       // Use BytesSource to play audio from memory
-      await _audioPlayer.play(BytesSource(audioData.data));
+      await _audioPlayer.play(BytesSource(audioToPlay));
 
       _addLog('Audio playback started successfully', LogType.audio);
     } catch (e) {
       _addLog('Failed to play audio: $e', LogType.error);
     }
+  }
+
+  /// Check if audio data is already a complete audio file (has proper headers)
+  bool _isCompleteAudioFile(Uint8List audioData) {
+    if (audioData.length < 12) return false;
+
+    // Check for WAV signature
+    if (audioData[0] == 0x52 && // 'R'
+        audioData[1] == 0x49 && // 'I'
+        audioData[2] == 0x46 && // 'F'
+        audioData[3] == 0x46 && // 'F'
+        audioData[8] == 0x57 && // 'W'
+        audioData[9] == 0x41 && // 'A'
+        audioData[10] == 0x56 && // 'V'
+        audioData[11] == 0x45) {
+      // 'E'
+      return true;
+    }
+
+    // Check for MP3 signature
+    if ((audioData[0] == 0xFF && (audioData[1] & 0xE0) == 0xE0) ||
+        (audioData[0] == 0x49 &&
+            audioData[1] == 0x44 &&
+            audioData[2] == 0x33)) {
+      return true;
+    }
+
+    // Check for other formats as needed
+    return false;
+  }
+
+  /// Convert raw PCM data to WAV format
+  Uint8List _convertPcmToWav(
+    Uint8List pcmData,
+    int sampleRate,
+    int channels,
+    int bitDepth,
+  ) {
+    final int dataSize = pcmData.length;
+    final int fileSize = 36 + dataSize;
+    final int byteRate = sampleRate * channels * (bitDepth ~/ 8);
+    final int blockAlign = channels * (bitDepth ~/ 8);
+
+    final ByteData wavHeader = ByteData(44);
+
+    // RIFF header
+    wavHeader.setUint8(0, 0x52); // 'R'
+    wavHeader.setUint8(1, 0x49); // 'I'
+    wavHeader.setUint8(2, 0x46); // 'F'
+    wavHeader.setUint8(3, 0x46); // 'F'
+    wavHeader.setUint32(4, fileSize, Endian.little); // File size
+    wavHeader.setUint8(8, 0x57); // 'W'
+    wavHeader.setUint8(9, 0x41); // 'A'
+    wavHeader.setUint8(10, 0x56); // 'V'
+    wavHeader.setUint8(11, 0x45); // 'E'
+
+    // fmt chunk
+    wavHeader.setUint8(12, 0x66); // 'f'
+    wavHeader.setUint8(13, 0x6D); // 'm'
+    wavHeader.setUint8(14, 0x74); // 't'
+    wavHeader.setUint8(15, 0x20); // ' '
+    wavHeader.setUint32(16, 16, Endian.little); // fmt chunk size
+    wavHeader.setUint16(20, 1, Endian.little); // Audio format (PCM)
+    wavHeader.setUint16(22, channels, Endian.little); // Number of channels
+    wavHeader.setUint32(24, sampleRate, Endian.little); // Sample rate
+    wavHeader.setUint32(28, byteRate, Endian.little); // Byte rate
+    wavHeader.setUint16(32, blockAlign, Endian.little); // Block align
+    wavHeader.setUint16(34, bitDepth, Endian.little); // Bits per sample
+
+    // data chunk
+    wavHeader.setUint8(36, 0x64); // 'd'
+    wavHeader.setUint8(37, 0x61); // 'a'
+    wavHeader.setUint8(38, 0x74); // 't'
+    wavHeader.setUint8(39, 0x61); // 'a'
+    wavHeader.setUint32(40, dataSize, Endian.little); // Data size
+
+    // Combine header and PCM data
+    final result = Uint8List(44 + dataSize);
+    result.setRange(0, 44, wavHeader.buffer.asUint8List());
+    result.setRange(44, 44 + dataSize, pcmData);
+
+    return result;
   }
 
   /// Check if two byte lists are equal (for echo detection)
@@ -1156,18 +1256,53 @@ class _SolariScreenState extends State<SolariScreen> {
 
     // Handle VQA text commands
     if (isTextCommand) {
-      if (dataStr.startsWith('VQA_IMG_START:')) {
-        final sizeStr = dataStr.substring(14); // "VQA_IMG_START:".length = 14
+      // VQA session start
+      if (dataStr == 'VQA_START') {
+        _receivingVQA = true;
+        _vqaImageReceived = false;
+        _vqaAudioReceived = false;
+        _vqaImageBuffer.clear();
+        _vqaAudioBuffer.clear();
+        _vqaStartTime = DateTime.now();
+        _receivingVQAAudio =
+            false; // Audio starts streaming immediately after VQA_START
+
+        _addLog(
+          'VQA session started - waiting for audio stream...',
+          LogType.vqa,
+        );
+        return;
+      }
+
+      // Audio streaming start (optional, but good for clarity)
+      if (dataStr == 'A_START') {
+        if (_receivingVQA && !_receivingVQAAudio) {
+          _receivingVQAAudio = true;
+          _vqaAudioBuffer.clear();
+          _vqaAudioStartTime = DateTime.now();
+
+          _addLog('VQA audio streaming started', LogType.vqa);
+        }
+        return;
+      }
+
+      // Audio streaming end
+      if (dataStr == 'A_END') {
+        if (_receivingVQA && !_vqaAudioReceived) {
+          _addLog('VQA audio streaming completed', LogType.vqa);
+          _finishVQAAudioReception();
+          _receivingVQAAudio = false;
+        }
+        return;
+      }
+
+      // Image header with size
+      if (dataStr.startsWith('I:')) {
+        final sizeStr = dataStr.substring(2); // "I:".length = 2
         try {
           _vqaExpectedImageSize = int.parse(sizeStr);
-          _receivingVQA = true;
-          _vqaImageReceived = false;
-          _vqaAudioReceived = false;
           _vqaImageBuffer.clear();
           _vqaImageStartTime = DateTime.now();
-          if (_vqaStartTime == null) {
-            _vqaStartTime = DateTime.now();
-          }
 
           _addLog(
             'Starting VQA image reception: $_vqaExpectedImageSize bytes',
@@ -1179,43 +1314,29 @@ class _SolariScreenState extends State<SolariScreen> {
         return;
       }
 
-      if (dataStr == 'VQA_IMG_END') {
-        if (_receivingVQA && !_vqaImageReceived) {
-          _addLog('Received VQA_IMG_END signal', LogType.vqa);
+      // Image end
+      if (dataStr == 'I_END') {
+        if (_receivingVQA && _vqaAudioReceived && !_vqaImageReceived) {
+          _addLog('VQA image transmission completed', LogType.vqa);
           _finishVQAImageReception();
         }
         return;
       }
 
-      if (dataStr.startsWith('VQA_AUD_START:')) {
-        final sizeStr = dataStr.substring(14); // "VQA_AUD_START:".length = 14
-        try {
-          _vqaExpectedAudioSize = int.parse(sizeStr);
-          _vqaAudioBuffer.clear();
-          _vqaAudioStartTime = DateTime.now();
-
-          _addLog(
-            'Starting VQA audio reception: $_vqaExpectedAudioSize bytes',
-            LogType.vqa,
-          );
-        } catch (e) {
-          _addLog('Invalid VQA audio size: $sizeStr', LogType.error);
-        }
-        return;
-      }
-
-      if (dataStr == 'VQA_AUD_END') {
-        if (_receivingVQA && _vqaImageReceived && !_vqaAudioReceived) {
-          _addLog('Received VQA_AUD_END signal', LogType.vqa);
-          _finishVQAAudioReception();
-        }
-        return;
-      }
-
-      if (dataStr == 'VQA_COMPLETE') {
+      // VQA session complete
+      if (dataStr == 'VQA_END') {
         if (_receivingVQA) {
-          _addLog('Received VQA_COMPLETE signal', LogType.vqa);
+          _addLog('VQA session completed', LogType.vqa);
           _finishVQAReception();
+        }
+        return;
+      }
+
+      // VQA session error (optional error handling)
+      if (dataStr == 'VQA_ERR') {
+        if (_receivingVQA) {
+          _addLog('VQA session failed', LogType.error);
+          _resetVQAState();
         }
         return;
       }
@@ -1223,14 +1344,16 @@ class _SolariScreenState extends State<SolariScreen> {
 
     // Add data to appropriate VQA buffer if receiving
     if (_receivingVQA) {
-      if (!_vqaImageReceived) {
-        // Currently receiving VQA image
-        _vqaImageBuffer.addAll(value);
+      if (_receivingVQAAudio && !_vqaAudioReceived) {
+        // Currently receiving VQA audio stream
+        _vqaAudioBuffer.addAll(value);
         setState(() {}); // Trigger UI update for progress bar
         _autoScrollToBottom();
-      } else if (_vqaImageReceived && !_vqaAudioReceived) {
-        // Currently receiving VQA audio
-        _vqaAudioBuffer.addAll(value);
+      } else if (_vqaAudioReceived &&
+          !_vqaImageReceived &&
+          _vqaExpectedImageSize > 0) {
+        // Currently receiving VQA image
+        _vqaImageBuffer.addAll(value);
         setState(() {}); // Trigger UI update for progress bar
         _autoScrollToBottom();
       }
@@ -1309,15 +1432,15 @@ class _SolariScreenState extends State<SolariScreen> {
 
       final audioData = Uint8List.fromList(_vqaAudioBuffer);
 
-      final sizeInfo = actualSize == _vqaExpectedAudioSize
-          ? 'Size: ${actualSize}B'
-          : 'Size: ${actualSize}B (expected: $_vqaExpectedAudioSize)';
+      // For streaming audio, we don't have a predefined size
+      final sizeInfo =
+          'Size: ${actualSize}B (${(actualSize / 1024.0).toStringAsFixed(1)} KB)';
 
       final speedInfo = transferDuration != null && actualSize > 0
           ? ' - Speed: ${(actualSize / transferDuration.inMilliseconds * 1000 / 1024).toStringAsFixed(2)} KB/s'
           : '';
 
-      // Analyze audio properties
+      // Analyze audio properties (assuming raw PCM from continuous stream)
       _analyzeAudioProperties(audioData)
           .then((properties) {
             String propertiesInfo = '';
@@ -1338,7 +1461,9 @@ class _SolariScreenState extends State<SolariScreen> {
               }
 
               audioProperties = AudioProperties(
-                sampleRate: properties['sample_rate'] ?? 0,
+                sampleRate:
+                    properties['sample_rate'] ??
+                    8000, // Default for VQA streaming
                 channels: properties['channels'] ?? 1,
                 bitDepth: properties['bit_depth'] ?? 16,
                 duration: properties['duration_seconds'] != null
@@ -1346,18 +1471,25 @@ class _SolariScreenState extends State<SolariScreen> {
                             properties['duration_seconds'].toString(),
                           ) ??
                           0.0
-                    : 0.0,
-                format: properties['format'] ?? 'Unknown',
+                    : (actualSize /
+                          (8000 *
+                              2 *
+                              1)), // Estimate duration for 8kHz 16-bit mono
+                format: properties['format'] ?? 'PCM',
                 compressionRatio: properties['compression_ratio']?.toDouble(),
               );
             } else {
+              // Default properties for VQA streaming (8kHz, 16-bit, mono PCM)
               audioProperties = AudioProperties(
-                sampleRate: 44100,
+                sampleRate: 8000,
                 channels: 1,
                 bitDepth: 16,
-                duration: 0.0,
-                format: 'Unknown',
+                duration:
+                    actualSize / (8000 * 2 * 1), // Duration calculation for PCM
+                format: 'PCM',
               );
+              propertiesInfo =
+                  ' | Format: PCM | Sample Rate: 8000 Hz | Channels: 1 | Duration: ${audioProperties.duration.toStringAsFixed(1)}s';
             }
 
             _vqaAudioData = AudioData(
@@ -1375,12 +1507,13 @@ class _SolariScreenState extends State<SolariScreen> {
             );
           })
           .catchError((error) {
+            // Fallback for VQA streaming audio
             final defaultProperties = AudioProperties(
-              sampleRate: 44100,
+              sampleRate: 8000,
               channels: 1,
               bitDepth: 16,
-              duration: 0.0,
-              format: 'Unknown',
+              duration: actualSize / (8000 * 2 * 1),
+              format: 'PCM',
             );
 
             _vqaAudioData = AudioData(
@@ -1390,7 +1523,7 @@ class _SolariScreenState extends State<SolariScreen> {
             _vqaAudioReceived = true;
 
             _addLog(
-              'VQA audio received! $sizeInfo$speedInfo | Analysis failed: $error',
+              'VQA audio received! $sizeInfo$speedInfo | Analysis failed, using defaults: PCM 8kHz 16-bit mono',
               LogType.vqa,
               dataSize: actualSize,
               duration: transferDuration,
@@ -1457,13 +1590,13 @@ class _SolariScreenState extends State<SolariScreen> {
         _receivingVQA = false;
         _vqaImageReceived = false;
         _vqaAudioReceived = false;
+        _receivingVQAAudio = false;
         _vqaImageData = null;
         _vqaAudioData = null;
         _vqaImageProperties = null;
         _vqaAudioProperties = null;
         _vqaStartTime = null;
         _vqaExpectedImageSize = 0;
-        _vqaExpectedAudioSize = 0;
         _vqaImageBuffer.clear();
         _vqaAudioBuffer.clear();
         _vqaImageStartTime = null;
@@ -1476,10 +1609,31 @@ class _SolariScreenState extends State<SolariScreen> {
         _receivingVQA = false;
         _vqaImageReceived = false;
         _vqaAudioReceived = false;
+        _receivingVQAAudio = false;
       });
     }
 
     _endOperation('vqa_complete_finalization');
+  }
+
+  /// Reset VQA state on error or cancellation
+  void _resetVQAState() {
+    setState(() {
+      _receivingVQA = false;
+      _vqaImageReceived = false;
+      _vqaAudioReceived = false;
+      _receivingVQAAudio = false;
+      _vqaImageData = null;
+      _vqaAudioData = null;
+      _vqaImageProperties = null;
+      _vqaAudioProperties = null;
+      _vqaStartTime = null;
+      _vqaExpectedImageSize = 0;
+      _vqaImageBuffer.clear();
+      _vqaAudioBuffer.clear();
+      _vqaImageStartTime = null;
+      _vqaAudioStartTime = null;
+    });
   }
 
   /// Finish image reception with timing information
@@ -1771,29 +1925,6 @@ class _SolariScreenState extends State<SolariScreen> {
     return (_vqaImageBuffer.length / _vqaExpectedImageSize).clamp(0.0, 1.0);
   }
 
-  /// Get current VQA audio transfer progress (0.0 to 1.0)
-  double get _vqaAudioProgress {
-    if (!_receivingVQA ||
-        !_vqaImageReceived ||
-        _vqaAudioReceived ||
-        _vqaExpectedAudioSize <= 0)
-      return 0.0;
-    return (_vqaAudioBuffer.length / _vqaExpectedAudioSize).clamp(0.0, 1.0);
-  }
-
-  /// Get VQA overall progress description
-  String get _vqaProgressDescription {
-    if (!_receivingVQA) return '';
-
-    if (!_vqaImageReceived) {
-      return 'Receiving VQA image...';
-    } else if (!_vqaAudioReceived) {
-      return 'Receiving VQA audio...';
-    } else {
-      return 'Finalizing VQA...';
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1825,6 +1956,18 @@ class _SolariScreenState extends State<SolariScreen> {
             tooltip: 'AI Assistant',
             padding: const EdgeInsets.all(8),
             color: _isConnected ? Colors.black : Colors.grey,
+          ),
+          // Disconnect Button
+          IconButton(
+            onPressed: _isConnected
+                ? () async {
+                    await widget.device.disconnect();
+                  }
+                : null,
+            icon: const Icon(Icons.link_off, size: 20),
+            tooltip: 'Disconnect',
+            padding: const EdgeInsets.all(8),
+            color: _isConnected ? Colors.red : Colors.grey,
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, size: 20),
@@ -1976,7 +2119,15 @@ class _SolariScreenState extends State<SolariScreen> {
                       double progressValue;
                       Color progressColor;
 
-                      if (!_vqaImageReceived) {
+                      if (_receivingVQAAudio && !_vqaAudioReceived) {
+                        // Show VQA audio streaming progress (indeterminate)
+                        progressText =
+                            'VQA Audio Streaming: ${(_vqaAudioBuffer.length / 1024.0).toStringAsFixed(1)} KB received';
+                        progressValue = -1.0; // Indeterminate progress
+                        progressColor = Colors.deepPurple;
+                      } else if (_vqaAudioReceived &&
+                          !_vqaImageReceived &&
+                          _vqaExpectedImageSize > 0) {
                         // Show VQA image progress
                         final percentage = (_vqaImageProgress * 100)
                             .toStringAsFixed(1);
@@ -1984,18 +2135,23 @@ class _SolariScreenState extends State<SolariScreen> {
                             'VQA Image: $percentage% (${_vqaImageBuffer.length}/${_vqaExpectedImageSize} bytes)';
                         progressValue = _vqaImageProgress;
                         progressColor = Colors.deepPurple;
-                      } else if (!_vqaAudioReceived) {
-                        // Show VQA audio progress
-                        final percentage = (_vqaAudioProgress * 100)
-                            .toStringAsFixed(1);
+                      } else if (_vqaAudioReceived &&
+                          !_vqaImageReceived &&
+                          _vqaExpectedImageSize == 0) {
+                        // Waiting for image header
                         progressText =
-                            'VQA Audio: $percentage% (${_vqaAudioBuffer.length}/${_vqaExpectedAudioSize} bytes)';
-                        progressValue = _vqaAudioProgress;
+                            'VQA: Audio complete, waiting for image...';
+                        progressValue = -1.0; // Indeterminate
                         progressColor = Colors.deepPurple;
-                      } else {
+                      } else if (_vqaImageReceived && _vqaAudioReceived) {
                         // Finalizing
                         progressText = 'Finalizing VQA operation...';
                         progressValue = 1.0;
+                        progressColor = Colors.deepPurple;
+                      } else {
+                        // Starting or waiting
+                        progressText = 'VQA: Initializing...';
+                        progressValue = 0.0;
                         progressColor = Colors.deepPurple;
                       }
 
@@ -2027,7 +2183,9 @@ class _SolariScreenState extends State<SolariScreen> {
                             ),
                             const SizedBox(height: 4),
                             LinearProgressIndicator(
-                              value: progressValue,
+                              value: progressValue >= 0
+                                  ? progressValue
+                                  : null, // null for indeterminate
                               backgroundColor: Colors.deepPurple[100],
                               valueColor: AlwaysStoppedAnimation<Color>(
                                 progressColor,
