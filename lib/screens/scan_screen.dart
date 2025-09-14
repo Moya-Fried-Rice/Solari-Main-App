@@ -176,7 +176,7 @@ class _ScanScreenState extends State<ScanScreen> {
           // Navigate to Solari screen after successful connection
           MaterialPageRoute route = MaterialPageRoute(
             builder: (context) => SolariScreen(device: device),
-            settings: const RouteSettings(name: '/SolariScreen'),
+            settings: const RouteSettings(name: '/SolariScreen'), // <----------------------------------------------- Temporary
           );
           Navigator.of(context).push(route);
         });
